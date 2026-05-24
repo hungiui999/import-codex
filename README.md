@@ -1,5 +1,9 @@
 # 9router – ChatGPT/Codex Bulk Importer
 
+NGUỒN TOOL CỦA TELEGRAM @BotbanloBot (Bán Json số lượng lớn giá chỉ từ 1x/1)
+
+
+
 Công cụ tự động import hàng loạt **OAuth token của ChatGPT/Codex** (định dạng JSON do CLI codex / extension lưu lại) thẳng vào database của **9router** (`data.sqlite` hoặc `db.json` cũ).
 
 Không cần `npm install` – chỉ dùng Node core (Node ≥ 18, đã đi kèm với 9router).
