@@ -207,8 +207,52 @@ function parseCodexFile(jsonText) {
   } catch (e) {
     return { error: `JSON không hợp lệ: ${e.message}` };
   }
-  if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    return { error: 'File phải là 1 JSON object (không phải mảng)' };
+  if (!data || typeof data !== 'object') {
+    return { error: 'File phải là JSON object/array' };
+  }
+
+  // Format 2: a single Codex credentials object (the original "goodjobem"
+  // shape we started with) — handled directly below.
+  // Format 3: an "exported_at + accounts[]" wrapper (CLI-Proxy / Codex
+  // Manager exports). Accept the first openai/codex account.
+  // Format 4: a bare array of credentials objects.
+  if (Array.isArray(data)) {
+    if (data.length === 0) return { error: 'Mảng rỗng' };
+    return parseCodexFile(JSON.stringify(data[0]));
+  }
+  if (Array.isArray(data.accounts)) {
+    const acc = data.accounts.find(
+      (a) =>
+        a &&
+        typeof a === 'object' &&
+        (a.platform === 'openai' ||
+          a.platform === 'codex' ||
+          a.type === 'codex' ||
+          (a.credentials && (a.credentials.access_token || a.credentials.accessToken)))
+    );
+    if (!acc) return { error: 'Không tìm thấy account openai/codex trong "accounts[]"' };
+    // Flatten: merge credentials + extra + top-level into a single object
+    // so the rest of the parser can treat it like a flat shape.
+    const merged = {
+      ...(acc.credentials || {}),
+      ...(acc.extra || {}),
+      email: (acc.extra && acc.extra.email) || acc.name || (acc.credentials && acc.credentials.email),
+      account_id:
+        (acc.credentials && acc.credentials.chatgpt_account_id) ||
+        (acc.credentials && acc.credentials.account_id),
+    };
+    return parseCodexFile(JSON.stringify(merged));
+  }
+
+  // Detect the "tokens" wrapper used by Codex CLI's own auth.json:
+  //   { auth_mode, OPENAI_API_KEY, tokens: { access_token, refresh_token, account_id, ... }, last_refresh }
+  if (data.tokens && typeof data.tokens === 'object' && !Array.isArray(data.tokens)) {
+    const merged = {
+      ...data.tokens,
+      email: data.tokens.email || data.email,
+      last_refresh: data.last_refresh || data.tokens.last_refresh,
+    };
+    return parseCodexFile(JSON.stringify(merged));
   }
 
   const accessToken = data.access_token || data.accessToken;
@@ -240,6 +284,7 @@ function parseCodexFile(jsonText) {
 
   const chatgptAccountId =
     (typeof auth.chatgpt_account_id === 'string' && auth.chatgpt_account_id) ||
+    (typeof data.chatgpt_account_id === 'string' && data.chatgpt_account_id) ||
     (typeof data.account_id === 'string' && data.account_id) ||
     null;
 
@@ -247,12 +292,24 @@ function parseCodexFile(jsonText) {
     (typeof auth.chatgpt_plan_type === 'string' && auth.chatgpt_plan_type) ||
     'free';
 
-  // expiresAt: prefer explicit "expired" field (already ISO).
-  // Fallback: last_refresh + 10 days, fallback again: now + 10 days.
+  // expiresAt: prefer explicit "expired" or "expires_at" field. Both ISO
+  // strings and Unix epochs (seconds or milliseconds) are accepted.
   let expiresAt = null;
-  if (typeof data.expired === 'string' && data.expired) {
-    const t = Date.parse(data.expired);
+  function epochToIso(n) {
+    if (!Number.isFinite(n) || n <= 0) return null;
+    // Heuristic: anything < 1e12 is seconds, ≥ 1e12 is ms.
+    const ms = n < 1e12 ? n * 1000 : n;
+    return new Date(ms).toISOString();
+  }
+  const expiredField = data.expired || data.expires_at || data.expiresAt;
+  if (typeof expiredField === 'string' && expiredField) {
+    const t = Date.parse(expiredField);
     if (!Number.isNaN(t)) expiresAt = new Date(t).toISOString();
+  } else if (typeof expiredField === 'number') {
+    expiresAt = epochToIso(expiredField);
+  }
+  if (!expiresAt && typeof data.expires_in === 'number' && data.expires_in > 0) {
+    expiresAt = new Date(Date.now() + data.expires_in * 1000).toISOString();
   }
   if (!expiresAt && typeof data.last_refresh === 'string') {
     const t = Date.parse(data.last_refresh);
