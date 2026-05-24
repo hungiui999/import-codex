@@ -452,6 +452,31 @@ function ensureConfigToml({ baseUrl, log = () => {} }) {
     }
   }
 
+  // 1b) Ensure top-level `model` is prefixed with "cx/" so 9router routes to
+  // the codex provider instead of trying (and failing) to find an `openai`
+  // credential. The 9router dashboard's "Apply 9Router Settings" button
+  // ships an unprefixed model name, which produces:
+  //   404 Not Found: No active credentials for provider: openai
+  // We fix that here at the source so users don't need to know.
+  const modelLineRe = /^model\s*=\s*"([^"]*)"\s*$/m;
+  const m = modelLineRe.exec(text);
+  if (m) {
+    const cur = m[1];
+    if (cur && !cur.includes('/')) {
+      // Bare name like "gpt-5.5" → "cx/gpt-5.5". Leave alone if it already
+      // has any prefix (cx/, openai/, etc.) — user's choice.
+      const fixed = `cx/${cur}`;
+      text = text.replace(modelLineRe, `model = "${fixed}"`);
+      log(`Codex CLI model: "${cur}" → "${fixed}" (thêm prefix cx/)`);
+    }
+  } else {
+    // No model line at all — pick a sensible default.
+    const insertion = 'model = "cx/gpt-5.5"\n';
+    const firstSection = text.search(/^\[/m);
+    if (firstSection === -1) text += insertion;
+    else text = text.slice(0, firstSection) + insertion + text.slice(firstSection);
+  }
+
   // 2) Ensure [model_providers.9router] block.
   const blockRe =
     /^\[model_providers\.9router\][\s\S]*?(?=^\[|\Z)/m;
