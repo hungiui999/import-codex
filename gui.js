@@ -145,10 +145,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 200, { ok: false, error: sizeCheck.error });
         return;
       }
-      const rows = await parseUploads(uploads, {
-        verifyPlanOnline: body.verifyPlanOnline !== false,
-        verifyConcurrency: 6,
-      });
+      const rows = await parseUploads(uploads);
       sendJson(res, 200, { ok: true, rows });
     } catch (e) {
       sendJson(res, 400, { ok: false, error: e.message || String(e) });
@@ -208,7 +205,6 @@ const server = http.createServer(async (req, res) => {
           baseUrl: typeof body.baseUrl === 'string' && body.baseUrl ? body.baseUrl : DEFAULT_BASE_URL,
           forceStop: !!body.forceStop,
           noRestart: !!body.noRestart,
-          verifyPlanOnline: body.verifyPlanOnline !== false,
           dryRun: false,
         });
 
@@ -243,10 +239,7 @@ const server = http.createServer(async (req, res) => {
       } finally {
         // Clean up staged files no matter what.
         try {
-          for (const s of stagedFiles) {
-            try { fs.unlinkSync(s.path); } catch (_) {}
-          }
-          fs.rmdirSync(tmpDir);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
         } catch (_) { /* ignore */ }
       }
     } catch (e) {

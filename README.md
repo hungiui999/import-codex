@@ -22,9 +22,9 @@ Sau khi xong, mở dashboard 9router → các Account mới sẽ xuất hiện t
 
 Tool tự động:
 
-- Verify thực plan (`free` / `plus` / `team` / `pro` / `enterprise`) qua `chatgpt.com/backend-api/subscriptions` rồi ghi đè giá trị từ JWT (vì JWT có thể bị "đông cứng" ở `free` sau khi user upgrade).
 - Tạo / refresh API key trong 9router và ghi `~/.codex/config.toml` + `~/.codex/auth.json` để Codex CLI dùng được ngay (không bị 401).
 - Force prefix `cx/` cho `model = "..."` trong `config.toml` để Codex CLI không gọi nhầm `provider: openai`.
+- Đọc plan (`free` / `plus` / `pro` / ...) từ JWT claims để ghi vào DB.
 
 ---
 
@@ -71,7 +71,7 @@ Tool sẽ:
 ```text
 node import.js [files|folders|zips] [--list]
                [--force-stop] [--no-restart]
-               [--no-configure-codex] [--no-verify-plan]
+               [--no-configure-codex]
                [--db <path>] [--url <baseUrl>]
 ```
 
@@ -82,7 +82,6 @@ node import.js [files|folders|zips] [--list]
 | `--force-stop`              | Nếu 9router đang chạy: dừng → ghi DB → khởi động lại                                    | off (mặc định bảo thủ: refuse + exit 4)   |
 | `--no-restart`              | Sau khi ghi DB **không** tự khởi động lại 9router                                       | off                                       |
 | `--no-configure-codex`      | KHÔNG ghi `~/.codex/config.toml` + `auth.json`                                          | off (mặc định: cấu hình)                  |
-| `--no-verify-plan`          | KHÔNG gọi `chatgpt.com/backend-api/subscriptions` để verify plan                       | off (mặc định: verify, có 1 lần retry)   |
 | `--db <path>`               | Chỉ định file `data.sqlite` hoặc `db.json`                                              | tự dò (`data.sqlite` nếu có, fallback `db.json`) |
 | `--url <baseUrl>`           | URL kiểm tra trạng thái 9router                                                         | `http://127.0.0.1:20128`                  |
 
@@ -112,7 +111,7 @@ node .\import.js .\tokens --db D:\tmp\db.json --no-restart
 Nhấp đôi `gui.cmd`. Tool spawn 1 web server cục bộ trên `127.0.0.1` rồi mở trình duyệt:
 
 - Kéo thả các file `.json` / `.zip` hoặc cả thư mục vào ô.
-- Nhấn **Kiểm tra token** để xem trước (email / plan / hết hạn). Plan kèm badge **API** (đã verify online) hoặc **JWT** (chỉ đọc từ claims).
+- Nhấn **Kiểm tra token** để xem trước (email / hết hạn / refresh-tail).
 - Nhấn **Import vào 9router** để ghi vào DB.
 - Ô **"Tự động dừng & khởi động lại 9router"** mặc định bật → tương đương `--force-stop` ở CLI.
 - Có thể đổi đường dẫn DB (auto-fill `data.sqlite` nếu phát hiện) hoặc URL 9router ở phía trên.
@@ -146,15 +145,3 @@ GUI giới hạn payload ở **32 MiB** (do JSON-over-HTTP). Nếu ZIP quá lớ
 - **Bảo mật log**: tool **không** in token đầy đủ ra console; chỉ hiển thị email + 8 ký tự cuối của refresh token. Response `/api/parse` và `/api/import` đều đã strip `accessToken`/`refreshToken`.
 
 DB sau khi cập nhật vẫn giữ nguyên các bảng/key khác (`providerNodes`, `proxyPools`, `modelAliases`, `mitmAlias`, `combos`, `apiKeys`, `settings`, `pricing` đối với JSON; mọi bảng khác đối với SQLite); chỉ thêm/sửa entry `provider: "codex"` trong `providerConnections` và (nếu cần) tạo 1 row trong `apiKeys`.
-
----
-
-## 7. Test
-
-```powershell
-node test\run.js
-# hoặc
-npm test
-```
-
-Tests dùng pure `node:assert` (không có framework, không có deps). Coverage: `parseCodexFile` (mọi format + lỗi), `mergeEntries` (add / refresh / skip), `decodeJwtPayload`, `ensureConfigToml` (idempotency, prefix-fix, preserve), `readZipEntries` (round-trip + edge cases), `mapWithConcurrency`, `parseUploads`.

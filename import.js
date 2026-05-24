@@ -22,7 +22,6 @@
  *   node import.js --force-stop                   # dừng + khởi động lại 9router
  *   node import.js --no-restart                   # ghi nhưng không restart
  *   node import.js --no-configure-codex           # KHÔNG tự config Codex CLI
- *   node import.js --no-verify-plan               # KHÔNG verify plan online
  *   node import.js --db D:\path\db.json           # chỉ định db.json/sqlite khác
  *
  * Mặc định, sau khi import xong tool sẽ:
@@ -62,7 +61,6 @@ function parseArgs(argv) {
     forceStop: false,
     noRestart: false,
     configureCodex: true,
-    verifyPlanOnline: true,
     dbPath: DEFAULT_DB_PATH,
     baseUrl: DEFAULT_BASE_URL,
     help: false,
@@ -74,8 +72,6 @@ function parseArgs(argv) {
     else if (a === '--no-restart') opts.noRestart = true;
     else if (a === '--no-configure-codex' || a === '--no-codex-config')
       opts.configureCodex = false;
-    else if (a === '--no-verify-plan' || a === '--offline-plan')
-      opts.verifyPlanOnline = false;
     else if (a === '--db') opts.dbPath = argv[++i];
     else if (a === '--url') opts.baseUrl = argv[++i];
     else if (a === '-h' || a === '--help') opts.help = true;
@@ -104,10 +100,6 @@ function fmtSource(s) {
   if (!s) return '';
   const parts = [];
   if (s.email) parts.push(s.email);
-  if (s.chatgptPlanType) {
-    const tag = s.planSource === 'subscriptions_api' ? 'API' : 'JWT';
-    parts.push(`plan=${s.chatgptPlanType} (${tag})`);
-  }
   if (s.expiresAt) parts.push(`expires=${s.expiresAt}`);
   if (s.refreshTail) parts.push(`refresh…${s.refreshTail}`);
   return parts.join(' · ');
@@ -158,12 +150,8 @@ function fmtSource(s) {
     }
   }
 
-  // Run the shared parse + verify pipeline. This handles BOM, the various
-  // JSON shapes, and concurrency-limited online plan verification.
-  const rows = await parseUploads(uploads, {
-    verifyPlanOnline: opts.verifyPlanOnline,
-    verifyConcurrency: 6,
-  });
+  // Run the shared parse pipeline so CLI and GUI behave identically.
+  const rows = await parseUploads(uploads);
 
   for (const row of rows) {
     const label = fileLabels.get(row.name) || row.name;
@@ -196,7 +184,6 @@ function fmtSource(s) {
       forceStop: opts.forceStop,
       noRestart: opts.noRestart,
       configureCodex: opts.configureCodex,
-      verifyPlanOnline: opts.verifyPlanOnline,
       dryRun: false,
       log: (m) => log(`${c.dim('·')} ${m}`),
     });

@@ -6,7 +6,5 @@
   "last_refresh": "2026-05-22T20:53:26Z",
   "email": "sample@example.com",
   "type": "codex",
-  "expired": "2026-06-01T20:53:27Z",
-  "oai_password": "REDACTED",
-  "outlook_email": "sample@example.com"
+  "expired": "2026-06-01T20:53:27Z"
 }

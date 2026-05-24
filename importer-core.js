@@ -437,132 +437,10 @@ function parseCodexFile(jsonText) {
       email,
       chatgptAccountId,
       chatgptPlanType,
-      chatgptPlanFromJwt: chatgptPlanType,
       expiresAt,
       refreshTail: refreshToken.slice(-8),
-      accessToken, // kept transient for online verification; do NOT log
     },
   };
-}
-
-// ---------------------------------------------------------------------------
-// ChatGPT subscriptions API — verify real plan online
-//
-// Calls https://chatgpt.com/backend-api/subscriptions?account_id=<id>
-// with Authorization: Bearer <access_token>. Returns the plan name observed,
-// or null on any error/timeout.
-// Response shape (relevant subset):
-//   { plan_type: "plus" | "free" | ..., subscription_id, ... }
-// or sometimes { has_subscription: bool, plan: { ... } }.
-// ---------------------------------------------------------------------------
-
-function verifyChatgptPlan({ accessToken, accountId, timeoutMs = 6000, retries = 1 }) {
-  return new Promise((resolve) => {
-    if (!accessToken || !accountId) {
-      resolve({ ok: false, reason: 'missing_input' });
-      return;
-    }
-    let attempt = 0;
-    function doRequest() {
-      const u = new URL(
-        `https://chatgpt.com/backend-api/subscriptions?account_id=${encodeURIComponent(accountId)}`
-      );
-      const req = https.request(
-        {
-          method: 'GET',
-          hostname: u.hostname,
-          port: 443,
-          path: u.pathname + u.search,
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            Accept: 'application/json',
-            'User-Agent':
-              'codex-cli/1.0.18 (9router-codex-importer)',
-            'OAI-Client-Version': 'codex-cli',
-          },
-          timeout: timeoutMs,
-        },
-        (res) => {
-          let buf = '';
-          res.setEncoding('utf8');
-          res.on('data', (c) => (buf += c));
-          res.on('end', () => {
-            if (res.statusCode !== 200) {
-              // HTTP errors (401/403/etc) are deterministic — don't retry.
-              resolve({
-                ok: false,
-                status: res.statusCode,
-                reason: `http_${res.statusCode}`,
-                body: buf.slice(0, 500),
-              });
-              return;
-            }
-            let body;
-            try {
-              body = JSON.parse(buf);
-            } catch (e) {
-              resolve({ ok: false, reason: 'parse_error', body: buf.slice(0, 500) });
-              return;
-            }
-            const plan =
-              (typeof body.plan_type === 'string' && body.plan_type) ||
-              (body.plan && typeof body.plan.name === 'string' && body.plan.name) ||
-              (body.plan && typeof body.plan.plan_type === 'string' && body.plan.plan_type) ||
-              (typeof body.subscription_plan === 'string' && body.subscription_plan) ||
-              null;
-            const planTypeRaw = plan ? String(plan).toLowerCase() : null;
-            const normalised = normalisePlan(planTypeRaw);
-            resolve({
-              ok: true,
-              plan: normalised,
-              rawPlan: plan,
-              hasSubscription:
-                body.has_subscription === true ||
-                !!body.subscription_id ||
-                (body.plan && body.plan.is_active === true) ||
-                false,
-              body,
-            });
-          });
-        }
-      );
-      req.on('timeout', () => {
-        req.destroy();
-        retryOrFail({ ok: false, reason: 'timeout' });
-      });
-      req.on('error', (e) => {
-        retryOrFail({ ok: false, reason: e.message });
-      });
-      req.end();
-    }
-    function retryOrFail(err) {
-      // Single retry on network-level failures only (DNS, ECONNRESET,
-      // timeout). HTTP errors above are NOT retried.
-      attempt += 1;
-      if (attempt <= retries) {
-        setTimeout(doRequest, 250);
-      } else {
-        resolve(err);
-      }
-    }
-    doRequest();
-  });
-}
-
-// Map any plan label (chatgpt-plus / Plus / cx/plus / team-monthly / …) to
-// our canonical short form. Returns the input lowercased if nothing matches,
-// or null when input is empty.
-function normalisePlan(planTypeRaw) {
-  if (!planTypeRaw) return null;
-  const s = String(planTypeRaw).toLowerCase();
-  // Strip a leading "cx/" or "openai/" prefix.
-  const stripped = s.replace(/^(?:cx|openai|chatgpt)[\/-]/, '');
-  if (/plus/.test(stripped)) return 'plus';
-  if (/team/.test(stripped)) return 'team';
-  if (/pro/.test(stripped)) return 'pro';
-  if (/enterprise|edu/.test(stripped)) return 'enterprise';
-  if (/free/.test(stripped)) return 'free';
-  return stripped || s;
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,86 +1158,24 @@ function mergeEntries(db, entries, opts = {}) {
 //
 // Pure parse pipeline used by both the CLI (--list) and the GUI (/api/parse).
 // Takes a list of uploads ({name, text} or {name, zip:base64}), expands ZIPs,
-// runs parseCodexFile, and optionally runs verifyChatgptPlan with a small
-// concurrency limit. Returns row objects suitable for display.
-//
-// Tokens are NEVER returned — `accessToken` is stripped from every row.
+// runs parseCodexFile. Returns row objects suitable for display.
 // ---------------------------------------------------------------------------
 
-async function parseUploads(uploads, opts = {}) {
-  const verifyPlanOnline = opts.verifyPlanOnline !== false;
-  const verifyTimeoutMs = opts.verifyTimeoutMs || 6000;
-  const verifyConcurrency =
-    Number.isFinite(opts.verifyConcurrency) && opts.verifyConcurrency > 0
-      ? Math.min(64, Math.floor(opts.verifyConcurrency))
-      : 6;
-
+async function parseUploads(uploads, _opts = {}) {
   const { uploads: expanded, errors } = expandUploads(uploads);
   const rows = [];
   for (const e of errors) rows.push({ name: e.name, error: e.error });
-  const verifyTargets = [];
   for (const u of expanded) {
     if (!u || typeof u.text !== 'string') continue;
     const r = parseCodexFile(u.text);
     if (r.error) {
       rows.push({ name: u.name, error: r.error });
     } else {
-      const row = { name: u.name, source: r.source };
-      rows.push(row);
-      if (verifyPlanOnline && r.source.accessToken && r.source.chatgptAccountId) {
-        verifyTargets.push(row);
-      } else if (r.source) {
-        // No verification possible — annotate so the UI can show "JWT only".
-        row.source.planSource = 'jwt_only';
-      }
+      rows.push({ name: u.name, source: r.source });
     }
-  }
-
-  if (verifyTargets.length > 0) {
-    await mapWithConcurrency(verifyTargets, verifyConcurrency, async (row) => {
-      try {
-        const v = await verifyChatgptPlan({
-          accessToken: row.source.accessToken,
-          accountId: row.source.chatgptAccountId,
-          timeoutMs: verifyTimeoutMs,
-        });
-        if (v.ok && v.plan) {
-          row.source.chatgptPlanFromJwt = row.source.chatgptPlanType;
-          row.source.chatgptPlanType = v.plan;
-          row.source.planSource = 'subscriptions_api';
-        } else {
-          row.source.planSource = 'jwt_only';
-          row.source.planVerificationError = v.reason || 'unknown';
-        }
-      } catch (e) {
-        row.source.planSource = 'jwt_only';
-        row.source.planVerificationError = e.message;
-      }
-    });
-  }
-
-  // Strip transient accessToken from every row before returning.
-  for (const row of rows) {
-    if (row.source) delete row.source.accessToken;
   }
   return rows;
 }
-
-// ---------------------------------------------------------------------------
-//
-// Steps:
-//   1. Detect 9router. If running:
-//      - dryRun                 -> proceed (read-only).
-//      - forceStop              -> stop, do work, restart.
-//      - noRestart              -> caller wants to write while server is up;
-//                                 we refuse (error code 4) since in-memory db
-//                                 will overwrite our changes.
-//      - default                -> same as forceStop (stop+restart).
-//   2. Backup db.json.
-//   3. Read, parse all input files, merge new entries, atomic write.
-//   4. Restart 9router if it was running and noRestart is false.
-//   5. Return a structured report.
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // bulkImport — orchestrator
@@ -1389,11 +1205,6 @@ async function bulkImport(opts = {}) {
   const skipDuplicates = opts.skipDuplicates !== false;
 
   // 0) expand & parse inputs first (fail fast on no files).
-  const verifyPlanOnline = opts.verifyPlanOnline !== false;
-  const verifyConcurrency =
-    Number.isFinite(opts.verifyConcurrency) && opts.verifyConcurrency > 0
-      ? Math.min(64, Math.floor(opts.verifyConcurrency))
-      : 6;
   const files = expandInputs(inputs);
   const parsed = [];
   for (const f of files) {
@@ -1413,67 +1224,6 @@ async function bulkImport(opts = {}) {
       const displayName = uploads.length === 1 ? f : `${f}::${u.name}`;
       if (r.error) parsed.push({ file: displayName, error: r.error });
       else parsed.push({ file: displayName, entry: r.entry, source: r.source });
-    }
-  }
-
-  // 0.5) Best-effort online plan verification for each parsed entry. Updates
-  // the entry's providerSpecificData.chatgptPlanType in place if the API
-  // returns a different plan than what the JWT claims (e.g. user upgraded
-  // to Plus after the token was issued).
-  //
-  // To avoid hammering chatgpt.com on a 50-account import we cap concurrency
-  // at `verifyConcurrency` (default 6).
-  if (verifyPlanOnline) {
-    const targets = parsed.filter(
-      (p) =>
-        p.entry &&
-        p.source &&
-        p.source.accessToken &&
-        p.source.chatgptAccountId
-    );
-    await mapWithConcurrency(targets, verifyConcurrency, async (p) => {
-      try {
-        const v = await verifyChatgptPlan({
-          accessToken: p.source.accessToken,
-          accountId: p.source.chatgptAccountId,
-          timeoutMs: opts.verifyTimeoutMs || 6000,
-        });
-        p.source.planVerification = v;
-        if (v.ok && v.plan) {
-          if (v.plan !== p.source.chatgptPlanType) {
-            log(
-              `Plan thực tế khác JWT cho ${p.source.email || p.source.chatgptAccountId}: ` +
-                `JWT="${p.source.chatgptPlanType}" → API="${v.plan}". Dùng API.`
-            );
-          }
-          p.source.chatgptPlanType = v.plan;
-          if (p.entry && p.entry.providerSpecificData) {
-            p.entry.providerSpecificData.chatgptPlanType = v.plan;
-            p.entry.providerSpecificData.planSource = 'subscriptions_api';
-          }
-        } else {
-          if (p.entry && p.entry.providerSpecificData) {
-            p.entry.providerSpecificData.planSource = 'jwt_only';
-            p.entry.providerSpecificData.planVerificationError =
-              v.reason || 'unknown';
-          }
-        }
-      } catch (e) {
-        p.source.planVerification = { ok: false, reason: e.message };
-      } finally {
-        // Strip transient access token from source so callers/UIs never
-        // see it; entry.accessToken remains the canonical store.
-        delete p.source.accessToken;
-      }
-    });
-    // Strip access tokens from any non-target sources too (parse errors,
-    // missing account id, etc).
-    for (const p of parsed) {
-      if (p.source) delete p.source.accessToken;
-    }
-  } else {
-    for (const p of parsed) {
-      if (p.source) delete p.source.accessToken;
     }
   }
 
@@ -1662,8 +1412,6 @@ module.exports = {
   decodeJwtPayload,
   parseCodexFile,
   parseUploads,
-  verifyChatgptPlan,
-  normalisePlan,
   is9routerRunning,
   stop9router,
   start9router,

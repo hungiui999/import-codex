@@ -10,8 +10,7 @@
   },
   "scripts": {
     "start": "node import.js",
-    "gui": "node gui.js",
-    "test": "node test/run.js"
+    "gui": "node gui.js"
   },
   "engines": {
     "node": ">=18"

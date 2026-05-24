@@ -188,6 +188,39 @@
       color: var(--muted);
       margin-top: 0.25rem;
     }
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 20, 25, 0.78);
+      backdrop-filter: blur(2px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.85rem;
+      z-index: 9999;
+      animation: fadein 0.12s ease-out;
+    }
+    .overlay[hidden] { display: none; }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid rgba(61, 156, 240, 0.25);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .overlay-text {
+      color: var(--text);
+      font-size: 0.95rem;
+      font-weight: 500;
+    }
+    .overlay-sub {
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
   </style>
 </head>
 <body>
@@ -253,6 +286,12 @@
     </div>
   </div>
 
+  <div class="overlay" id="overlay" hidden role="status" aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <div class="overlay-text" id="overlayText">Đang xử lý…</div>
+    <div class="overlay-sub" id="overlaySub"></div>
+  </div>
+
   <script>
     const drop = document.getElementById('drop');
     const fileInput = document.getElementById('fileInput');
@@ -292,6 +331,16 @@
     const fileNames = document.getElementById('fileNames');
     const fileListWrap = document.getElementById('fileListWrap');
     const tableWrap = document.getElementById('tableWrap');
+    const overlay = document.getElementById('overlay');
+    const overlayText = document.getElementById('overlayText');
+    const overlaySub = document.getElementById('overlaySub');
+
+    function showOverlay(text, sub) {
+      overlayText.textContent = text || 'Đang xử lý…';
+      overlaySub.textContent = sub || '';
+      overlay.hidden = false;
+    }
+    function hideOverlay() { overlay.hidden = true; }
 
     /** @type {Map<string, { name: string, size: number, text?: string, zip?: string }>} */
     const files = new Map();
@@ -371,29 +420,21 @@
         return;
       }
       let h =
-        '<table><thead><tr><th>File</th><th>Email</th><th>Plan</th><th>Hết hạn</th><th>Trạng thái</th></tr></thead><tbody>';
+        '<table><thead><tr><th>File</th><th>Email</th><th>Hết hạn</th><th>Trạng thái</th></tr></thead><tbody>';
       for (const row of rows) {
         const name = esc(row.name || '');
         if (row.error) {
           h +=
-            '<tr><td>' + name + '</td><td colspan="4"><span class="status-err">' +
+            '<tr><td>' + name + '</td><td colspan="3"><span class="status-err">' +
             esc(row.error) +
             '</span></td></tr>';
         } else {
           const s = row.source || {};
-          const plan = esc(s.chatgptPlanType || '—');
-          const planSrc = s.planSource === 'subscriptions_api'
-            ? '<span title="Verified qua subscriptions API" style="font-size:0.7em;color:var(--ok);margin-left:0.25rem">API</span>'
-            : s.planSource === 'jwt_only'
-            ? '<span title="Chỉ đọc từ JWT, chưa verify online" style="font-size:0.7em;color:var(--warn);margin-left:0.25rem">JWT</span>'
-            : '';
           h +=
             '<tr><td>' +
             name +
             '</td><td>' +
             esc(s.email || '—') +
-            '</td><td>' +
-            plan + planSrc +
             '</td><td>' +
             esc(s.expiresAt || '—') +
             '</td><td><span class="status-ok">OK · refresh…' +
@@ -410,12 +451,12 @@
       const skipped = new Set(skippedEmails || []);
       const refreshed = new Set(refreshedEmails || []);
       let h =
-        '<table><thead><tr><th>File</th><th>Email</th><th>Plan</th><th>Trạng thái</th></tr></thead><tbody>';
+        '<table><thead><tr><th>File</th><th>Email</th><th>Trạng thái</th></tr></thead><tbody>';
       for (const row of parsed || []) {
         const name = esc(row.name || (row.file ? row.file.split(/[\\/]/).pop() : ''));
         if (row.error) {
           h +=
-            '<tr><td>' + name + '</td><td colspan="3"><span class="status-err">' +
+            '<tr><td>' + name + '</td><td colspan="2"><span class="status-err">' +
             esc(row.error) + '</span></td></tr>';
         } else {
           const s = row.source || {};
@@ -432,7 +473,6 @@
           }
           h +=
             '<tr><td>' + name + '</td><td>' + esc(s.email || '—') +
-            '</td><td>' + esc(s.chatgptPlanType || '—') +
             '</td><td>' + cell + '</td></tr>';
         }
       }
@@ -533,6 +573,7 @@
         return;
       }
       btnParse.disabled = true;
+      showOverlay('Đang phân tích token…', files.size + ' file');
       try {
         const data = await postJson('/api/parse', { files: payloadFiles() });
         resultPanel.hidden = false;
@@ -550,6 +591,7 @@
         tableWrap.innerHTML = '';
       } finally {
         btnParse.disabled = false;
+        hideOverlay();
       }
     });
 
@@ -559,6 +601,10 @@
         return;
       }
       btnImport.disabled = true;
+      const sub = forceStopEl.checked
+        ? 'Sẽ dừng & khởi động lại 9router'
+        : 'Ghi DB (9router phải đang tắt)';
+      showOverlay('Đang import vào 9router…', sub);
       try {
         const data = await postJson('/api/import', {
           files: payloadFiles(),
@@ -589,6 +635,7 @@
         setBanner(String(err.message || err), 'err');
       } finally {
         btnImport.disabled = false;
+        hideOverlay();
       }
     });
   </script>
