@@ -84,11 +84,11 @@ try {
 
 // Inject default db path placeholder so the field shows the actual resolved
 // path without revealing it as a value.
+const dbPathDisplay = DEFAULT_DB_PATH.replace(/\\/g, '\\\\').replace(/"/g, '&quot;');
+const dbBackend = /\.sqlite$/i.test(DEFAULT_DB_PATH) ? 'sqlite' : 'json';
 guiHtml = guiHtml.replace(
   'placeholder="%APPDATA%\\\\9router\\\\db.json"',
-  'placeholder="' +
-    DEFAULT_DB_PATH.replace(/\\/g, '\\\\').replace(/"/g, '&quot;') +
-    '"'
+  `placeholder="${dbPathDisplay}" data-default="${dbPathDisplay}" data-backend="${dbBackend}"`
 );
 
 // Expand a list of incoming uploads. Each upload is { name, text?, zip? }

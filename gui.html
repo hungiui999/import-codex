@@ -201,8 +201,12 @@
       <div class="panel">
         <div class="grid grid-2">
           <div>
-            <label for="dbPath">Đường dẫn db.json</label>
+            <label for="dbPath">
+              Đường dẫn DB (tự dò)
+              <span id="dbBackendBadge" style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:4px;background:rgba(61,156,240,0.15);color:var(--accent);margin-left:0.35rem;display:none">sqlite</span>
+            </label>
             <input type="text" id="dbPath" value="" autocomplete="off" placeholder="%APPDATA%\\9router\\db.json" />
+            <p class="meta" id="dbPathHint">Tự động tìm <code>data.sqlite</code> hoặc <code>db.json</code> trong <code>%APPDATA%\9router\</code>. Đổi nếu bạn muốn ghi vào file khác.</p>
           </div>
           <div>
             <label for="url">URL 9router (kiểm tra trạng thái)</label>
@@ -253,7 +257,32 @@
     const drop = document.getElementById('drop');
     const fileInput = document.getElementById('fileInput');
     const dbPathEl = document.getElementById('dbPath');
+    const dbBackendBadge = document.getElementById('dbBackendBadge');
     const urlEl = document.getElementById('url');
+
+    // Auto-fill the detected DB path on first load. The server injects it
+    // as the placeholder + a data-default attribute so we can promote it
+    // to a real value (visible, editable).
+    (function autofillDbPath() {
+      const def = dbPathEl.getAttribute('data-default');
+      if (def && !dbPathEl.value) dbPathEl.value = def;
+      const backend = dbPathEl.getAttribute('data-backend') || '';
+      if (backend && dbBackendBadge) {
+        dbBackendBadge.textContent = backend;
+        dbBackendBadge.style.display = 'inline-block';
+      }
+      // Re-detect backend label whenever user edits manually.
+      dbPathEl.addEventListener('input', () => {
+        const v = (dbPathEl.value || '').toLowerCase();
+        const b = v.endsWith('.sqlite') ? 'sqlite' : v.endsWith('.json') ? 'json' : '';
+        if (b && dbBackendBadge) {
+          dbBackendBadge.textContent = b;
+          dbBackendBadge.style.display = 'inline-block';
+        } else if (dbBackendBadge) {
+          dbBackendBadge.style.display = 'none';
+        }
+      });
+    })();
     const forceStopEl = document.getElementById('forceStop');
     const btnParse = document.getElementById('btnParse');
     const btnImport = document.getElementById('btnImport');
