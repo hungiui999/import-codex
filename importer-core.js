@@ -35,19 +35,58 @@ const { randomUUID } = require('crypto');
 // ---------------------------------------------------------------------------
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:20128';
-const DEFAULT_DB_PATH = path.join(
-  process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'),
-  '9router',
-  'db.json'
+const APPDATA_9ROUTER = path.join(
+  process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
+  '9router'
 );
+const DEFAULT_SQLITE_PATH = path.join(APPDATA_9ROUTER, 'db', 'data.sqlite');
+const DEFAULT_JSON_PATH = path.join(APPDATA_9ROUTER, 'db.json');
+// "DB path" can refer to either the SQLite file or the legacy JSON file.
+// We pick whichever actually exists; SQLite wins when both are present.
+const DEFAULT_DB_PATH = fs.existsSync(DEFAULT_SQLITE_PATH)
+  ? DEFAULT_SQLITE_PATH
+  : DEFAULT_JSON_PATH;
 const NINER_CLI = path.join(
-  process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'),
+  process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
   'npm',
   'node_modules',
   '9router',
   'cli.js'
 );
+const NINER_BETTER_SQLITE = path.join(
+  process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
+  '9router',
+  'runtime',
+  'node_modules',
+  'better-sqlite3'
+);
 const NODE_EXE = process.execPath; // current Node binary
+
+function isSqlitePath(p) {
+  return /\.sqlite$/i.test(p || '');
+}
+
+let _Database = null;
+function loadBetterSqlite() {
+  if (_Database) return _Database;
+  // Try the bundled native binary 9router ships with first — guaranteed
+  // to be ABI-compatible with the Node we're using since it's the same
+  // node binary that 9router runs.
+  const candidates = [NINER_BETTER_SQLITE, 'better-sqlite3'];
+  let lastErr = null;
+  for (const cand of candidates) {
+    try {
+      _Database = require(cand);
+      return _Database;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(
+    `Không tải được better-sqlite3 (đã thử: ${candidates.join(', ')}). ` +
+      `Lỗi cuối: ${lastErr && lastErr.message}`
+  );
+}
 
 // ---------------------------------------------------------------------------
 // expandInputs
@@ -184,6 +223,7 @@ function parseCodexFile(jsonText) {
     provider: 'codex',
     authType: 'oauth',
     name,
+    email: email || null,
     priority: 0, // will be reassigned by mergeEntries
     isActive: true,
     createdAt: now,
@@ -644,9 +684,99 @@ async function waitFor9routerUp(baseUrl = DEFAULT_BASE_URL, timeoutMs = 30000) {
 // db.json IO
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// db IO — supports both legacy db.json and new SQLite (data.sqlite).
+//
+// Internally we always present the same shape to callers:
+//   { providerConnections: [...flat objects...], apiKeys: [...] }
+//
+// SQLite stores most provider fields in a JSON blob in `data` column. Reading
+// expands that back into a single object. Saving collapses it again.
+// ---------------------------------------------------------------------------
+
+// Fields that live as TOP-LEVEL columns in providerConnections (vs inside data)
+const PC_TOP_LEVEL = ['id', 'provider', 'authType', 'name', 'email', 'priority', 'isActive'];
+
+function expandPcRow(row) {
+  let data = {};
+  if (typeof row.data === 'string' && row.data.trim()) {
+    try {
+      data = JSON.parse(row.data);
+    } catch (_) {
+      data = {};
+    }
+  }
+  const out = {
+    ...data,
+    id: row.id,
+    provider: row.provider,
+    authType: row.authType,
+    name: row.name,
+    email: row.email,
+    priority: typeof row.priority === 'number' ? row.priority : 0,
+    isActive: !!row.isActive,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+  return out;
+}
+
+function collapsePcEntry(entry) {
+  // Pull top-level columns out of the entry, the rest goes into data.
+  const data = { ...entry };
+  for (const k of PC_TOP_LEVEL) delete data[k];
+  delete data.createdAt;
+  delete data.updatedAt;
+  return {
+    id: entry.id,
+    provider: entry.provider,
+    authType: entry.authType,
+    name: entry.name || null,
+    email: entry.email || null,
+    priority: entry.priority || 0,
+    isActive: entry.isActive ? 1 : 0,
+    data: JSON.stringify(data),
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+  };
+}
+
 function loadDb(dbPath) {
+  if (isSqlitePath(dbPath)) {
+    if (!fs.existsSync(dbPath)) {
+      // Will be created on save.
+      return {
+        providerConnections: [],
+        apiKeys: [],
+        __backend: 'sqlite',
+        __dbPath: dbPath,
+      };
+    }
+    const Database = loadBetterSqlite();
+    const conn = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const pcRows = conn.prepare('SELECT * FROM providerConnections').all();
+      const akRows = conn.prepare('SELECT * FROM apiKeys').all();
+      return {
+        providerConnections: pcRows.map(expandPcRow),
+        apiKeys: akRows.map((r) => ({
+          id: r.id,
+          key: r.key,
+          name: r.name,
+          machineId: r.machineId,
+          isActive: !!r.isActive,
+          createdAt: r.createdAt,
+        })),
+        __backend: 'sqlite',
+        __dbPath: dbPath,
+      };
+    } finally {
+      conn.close();
+    }
+  }
+
+  // Legacy JSON fallback.
   if (!fs.existsSync(dbPath)) {
-    // Minimal shape if missing — preserves keys observed in real db.
     return {
       providerConnections: [],
       providerNodes: [],
@@ -657,39 +787,123 @@ function loadDb(dbPath) {
       apiKeys: [],
       settings: {},
       pricing: {},
+      __backend: 'json',
+      __dbPath: dbPath,
     };
   }
   const raw = fs.readFileSync(dbPath, 'utf8');
+  let parsed;
   try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('db.json không phải object');
-    }
-    if (!Array.isArray(parsed.providerConnections)) {
-      parsed.providerConnections = [];
-    }
-    return parsed;
+    parsed = JSON.parse(raw);
   } catch (e) {
     throw new Error(`Không đọc được db.json: ${e.message}`);
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('db.json không phải object');
+  }
+  if (!Array.isArray(parsed.providerConnections)) parsed.providerConnections = [];
+  if (!Array.isArray(parsed.apiKeys)) parsed.apiKeys = [];
+  parsed.__backend = 'json';
+  parsed.__dbPath = dbPath;
+  return parsed;
 }
 
 function backupDb(dbPath) {
   if (!fs.existsSync(dbPath)) return null;
-  const ts = new Date()
-    .toISOString()
-    .replace(/[:.]/g, '-');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const bak = `${dbPath}.bak-${ts}`;
+  // For SQLite, copy the .sqlite file. We do NOT copy -wal/-shm because the
+  // server is stopped before we touch the DB.
   fs.copyFileSync(dbPath, bak);
   return bak;
 }
 
 function saveDb(dbPath, db) {
+  if (isSqlitePath(dbPath) || db.__backend === 'sqlite') {
+    const Database = loadBetterSqlite();
+    const dir = path.dirname(dbPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    // Open writable. If file doesn't exist, create with a minimal schema
+    // matching what 9router itself uses (TEXT id PK + JSON data column).
+    const conn = new Database(dbPath);
+    try {
+      conn.pragma('journal_mode = WAL');
+      conn.exec(`
+        CREATE TABLE IF NOT EXISTS providerConnections (
+          id TEXT PRIMARY KEY,
+          provider TEXT,
+          authType TEXT,
+          name TEXT,
+          email TEXT,
+          priority INTEGER,
+          isActive INTEGER,
+          data TEXT,
+          createdAt TEXT,
+          updatedAt TEXT
+        );
+        CREATE TABLE IF NOT EXISTS apiKeys (
+          id TEXT PRIMARY KEY,
+          key TEXT,
+          name TEXT,
+          machineId TEXT,
+          isActive INTEGER,
+          createdAt TEXT
+        );
+      `);
+
+      const upsertPc = conn.prepare(
+        `INSERT INTO providerConnections (id, provider, authType, name, email, priority, isActive, data, createdAt, updatedAt)
+         VALUES (@id, @provider, @authType, @name, @email, @priority, @isActive, @data, @createdAt, @updatedAt)
+         ON CONFLICT(id) DO UPDATE SET
+           provider=excluded.provider,
+           authType=excluded.authType,
+           name=excluded.name,
+           email=excluded.email,
+           priority=excluded.priority,
+           isActive=excluded.isActive,
+           data=excluded.data,
+           updatedAt=excluded.updatedAt`
+      );
+      const upsertAk = conn.prepare(
+        `INSERT INTO apiKeys (id, key, name, machineId, isActive, createdAt)
+         VALUES (@id, @key, @name, @machineId, @isActive, @createdAt)
+         ON CONFLICT(id) DO UPDATE SET
+           key=excluded.key,
+           name=excluded.name,
+           machineId=excluded.machineId,
+           isActive=excluded.isActive`
+      );
+      const tx = conn.transaction(() => {
+        for (const e of db.providerConnections || []) {
+          upsertPc.run(collapsePcEntry(e));
+        }
+        for (const k of db.apiKeys || []) {
+          upsertAk.run({
+            id: k.id,
+            key: k.key,
+            name: k.name || '',
+            machineId: k.machineId || '',
+            isActive: k.isActive ? 1 : 0,
+            createdAt: k.createdAt || new Date().toISOString(),
+          });
+        }
+      });
+      tx();
+    } finally {
+      conn.close();
+    }
+    return;
+  }
+
+  // Legacy JSON: atomic write via tmp + rename. Strip our internal markers.
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const out = { ...db };
+  delete out.__backend;
+  delete out.__dbPath;
   const tmp = `${dbPath}.tmp`;
-  const json = JSON.stringify(db, null, 2);
-  fs.writeFileSync(tmp, json, 'utf8');
+  fs.writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf8');
   fs.renameSync(tmp, dbPath);
 }
 
@@ -983,7 +1197,7 @@ async function bulkImport(opts = {}) {
 
     saveDb(dbPath, db);
     log(
-      `Đã ghi db.json — thêm ${added}, cập nhật ${refreshed} (trùng), bỏ qua ${skipped - refreshed}.`
+      `Đã ghi DB (${db.__backend || 'json'}) — thêm ${added}, cập nhật ${refreshed} (trùng), bỏ qua ${skipped - refreshed}.`
     );
   } catch (e) {
     writeError = e.message;
