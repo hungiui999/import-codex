@@ -19,7 +19,14 @@
  *   node import.js --list                         # dry-run, in preview, KHÔNG ghi
  *   node import.js --force-stop                   # dừng + khởi động lại 9router
  *   node import.js --no-restart                   # ghi nhưng không restart
+ *   node import.js --no-configure-codex           # KHÔNG tự config Codex CLI
  *   node import.js --db D:\path\db.json           # chỉ định db.json khác
+ *
+ * Mặc định, sau khi import xong tool sẽ:
+ *   - đảm bảo 9router có ít nhất 1 API key (tạo mới nếu cần)
+ *   - ghi ~/.codex/config.toml (model_provider = "9router")
+ *   - ghi ~/.codex/auth.json (auth_mode=apikey, OPENAI_API_KEY=<key>)
+ * → Codex CLI dùng được ngay, không bị 401.
  *
  * EXIT CODES
  *   0  OK
@@ -49,6 +56,7 @@ function parseArgs(argv) {
     dry: false,
     forceStop: false,
     noRestart: false,
+    configureCodex: true,
     dbPath: DEFAULT_DB_PATH,
     baseUrl: DEFAULT_BASE_URL,
     help: false,
@@ -58,6 +66,8 @@ function parseArgs(argv) {
     if (a === '--list' || a === '--dry' || a === '--dry-run') opts.dry = true;
     else if (a === '--force-stop') opts.forceStop = true;
     else if (a === '--no-restart') opts.noRestart = true;
+    else if (a === '--no-configure-codex' || a === '--no-codex-config')
+      opts.configureCodex = false;
     else if (a === '--db') opts.dbPath = argv[++i];
     else if (a === '--url') opts.baseUrl = argv[++i];
     else if (a === '-h' || a === '--help') opts.help = true;
@@ -157,6 +167,7 @@ function fmtSource(s) {
       baseUrl: opts.baseUrl,
       forceStop: opts.forceStop,
       noRestart: opts.noRestart,
+      configureCodex: opts.configureCodex,
       dryRun: false,
       log: (m) => log(`${c.dim}·${c.reset} ${m}`),
     });
@@ -190,6 +201,15 @@ function fmtSource(s) {
   }
   if (result.skippedEmails && result.skippedEmails.length) {
     log(`${c.dim}Bỏ qua:${c.reset} ${result.skippedEmails.join(', ')}`);
+  }
+  if (result.codexCliConfig) {
+    const cc = result.codexCliConfig;
+    log(
+      `${c.dim}Codex CLI:${c.reset} ${c.green}đã cấu hình${c.reset} ` +
+        `(API key sk-…${cc.apiKey.slice(-6)}${cc.createdKey ? ' [mới tạo]' : ''})`
+    );
+    log(`${c.dim}  ${cc.configPath}${c.reset}`);
+    log(`${c.dim}  ${cc.authPath}${c.reset}`);
   }
   process.exit(result.code || 0);
 })().catch((e) => {

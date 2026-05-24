@@ -25,6 +25,7 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const os = require('os');
 const { execFileSync, spawn } = require('child_process');
 const { randomUUID } = require('crypto');
 
@@ -207,6 +208,187 @@ function parseCodexFile(jsonText) {
       expiresAt,
       refreshTail: refreshToken.slice(-8),
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Codex CLI auto-config
+//
+// Goal: make sure that after we import a Codex/ChatGPT account, running
+// `codex` immediately works against 9router (no 401 Invalid API key, no
+// "auth_mode: chatgpt" leftover from an older device login).
+//
+// Two files are touched, mirroring what 9router's own /api/cli-tools/codex-
+// settings POST endpoint would do:
+//
+//   ~/.codex/config.toml
+//     model_provider = "9router"
+//     [model_providers.9router]
+//     name      = "9Router"
+//     base_url  = "<baseUrl>/v1"
+//     wire_api  = "responses"
+//
+//   ~/.codex/auth.json
+//     { "OPENAI_API_KEY": "<key>", "auth_mode": "apikey", ... preserved ... }
+//
+// The api key is read from db.json (first active entry in apiKeys[]). If
+// requireApiKey is enabled and there is no active key, we create one named
+// "Codex Auto" and persist it back to db.json.
+// ---------------------------------------------------------------------------
+
+function codexHomeDir() {
+  return path.join(os.homedir(), '.codex');
+}
+
+function codexConfigPath() {
+  return path.join(codexHomeDir(), 'config.toml');
+}
+
+function codexAuthPath() {
+  return path.join(codexHomeDir(), 'auth.json');
+}
+
+function pickOrCreateApiKey(db, { log = () => {} } = {}) {
+  if (!db || typeof db !== 'object') return null;
+  if (!Array.isArray(db.apiKeys)) db.apiKeys = [];
+  // Prefer an existing active key.
+  const existing = db.apiKeys.find((k) => k && k.isActive && k.key);
+  if (existing) return { key: existing.key, created: false, name: existing.name };
+
+  // None active — create one. Match 9router's general key shape: sk-<hex>.
+  const machineId = randomUUID().replace(/-/g, '').slice(0, 16);
+  const tail =
+    randomUUID().replace(/-/g, '').slice(0, 6) +
+    '-' +
+    randomUUID().replace(/-/g, '').slice(0, 8);
+  const newKey = `sk-${machineId}-${tail}`;
+  const row = {
+    id: randomUUID(),
+    name: 'Codex Auto',
+    key: newKey,
+    machineId,
+    isActive: true,
+    createdAt: new Date().toISOString(),
+  };
+  db.apiKeys.push(row);
+  log('Đã tạo API key mới trong 9router: "Codex Auto"');
+  return { key: newKey, created: true, name: row.name };
+}
+
+// Tiny, surgical TOML writer. We do NOT parse the full file — we only edit
+// the few keys we care about, preserving the rest verbatim. This handles
+// the realistic case where 9router (or the Codex desktop app) has already
+// written its own keys into config.toml.
+function ensureConfigToml({ baseUrl, log = () => {} }) {
+  const file = codexConfigPath();
+  const v1 = baseUrl.replace(/\/+$/, '').endsWith('/v1')
+    ? baseUrl.replace(/\/+$/, '')
+    : `${baseUrl.replace(/\/+$/, '')}/v1`;
+
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (_) {
+    text = '';
+  }
+
+  // 1) Ensure top-level `model_provider = "9router"`.
+  const mpLineRe = /^model_provider\s*=.*$/m;
+  if (mpLineRe.test(text)) {
+    text = text.replace(mpLineRe, 'model_provider = "9router"');
+  } else {
+    // Insert at top, before any [section] header.
+    const firstSection = text.search(/^\[/m);
+    const insertion = 'model_provider = "9router"\n';
+    if (firstSection === -1) {
+      text = (text ? text.replace(/\s*$/, '\n') : '') + insertion;
+    } else {
+      text =
+        text.slice(0, firstSection) +
+        insertion +
+        text.slice(firstSection);
+    }
+  }
+
+  // 2) Ensure [model_providers.9router] block.
+  const blockRe =
+    /^\[model_providers\.9router\][\s\S]*?(?=^\[|\Z)/m;
+  const desiredBlock =
+    '[model_providers.9router]\n' +
+    'name = "9Router"\n' +
+    `base_url = "${v1}"\n` +
+    'wire_api = "responses"\n\n';
+  if (blockRe.test(text)) {
+    text = text.replace(blockRe, desiredBlock);
+  } else {
+    if (!text.endsWith('\n')) text += '\n';
+    text += '\n' + desiredBlock;
+  }
+
+  // Ensure trailing newline, no triple-blank tail.
+  text = text.replace(/\n{3,}$/g, '\n\n').replace(/\s*$/, '\n');
+
+  const dir = path.dirname(file);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, text, 'utf8');
+  log(`Đã cập nhật ${file}`);
+  return file;
+}
+
+function ensureAuthJson({ apiKey, log = () => {} }) {
+  const file = codexAuthPath();
+  let cur = {};
+  try {
+    cur = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!cur || typeof cur !== 'object' || Array.isArray(cur)) cur = {};
+  } catch (_) {
+    cur = {};
+  }
+  // Backup once, only if file existed and was non-empty.
+  try {
+    if (fs.existsSync(file) && fs.statSync(file).size > 0) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      fs.copyFileSync(file, `${file}.bak-${ts}`);
+    }
+  } catch (_) {
+    /* best effort */
+  }
+  cur.OPENAI_API_KEY = apiKey;
+  cur.auth_mode = 'apikey';
+  // Preserve cur.tokens / cur.last_refresh if present — Codex CLI ignores
+  // them once auth_mode = apikey, but keeping them doesn't hurt.
+
+  const dir = path.dirname(file);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(cur, null, 2), 'utf8');
+  log(`Đã cập nhật ${file} (auth_mode=apikey, OPENAI_API_KEY=sk-…${apiKey.slice(-6)})`);
+  return file;
+}
+
+/**
+ * Apply 9router config to Codex CLI in one shot.
+ *  - mutates `db` in place to ensure an active apiKey exists
+ *  - writes ~/.codex/config.toml (idempotent)
+ *  - writes ~/.codex/auth.json (apikey mode)
+ *
+ * Returns { configPath, authPath, apiKey, createdKey }.
+ *
+ * Caller is responsible for persisting `db` (saveDb) afterwards if the key
+ * was newly created.
+ */
+function configureCodexCli({ db, baseUrl = DEFAULT_BASE_URL, log = () => {} }) {
+  const picked = pickOrCreateApiKey(db, { log });
+  if (!picked) throw new Error('Không tìm/tạo được API key trong 9router');
+
+  const configPath = ensureConfigToml({ baseUrl, log });
+  const authPath = ensureAuthJson({ apiKey: picked.key, log });
+
+  return {
+    configPath,
+    authPath,
+    apiKey: picked.key,
+    apiKeyName: picked.name,
+    createdKey: picked.created,
   };
 }
 
@@ -589,6 +771,7 @@ async function bulkImport(opts = {}) {
   let addedEmails = [];
   let skippedEmails = [];
   let writeError = null;
+  let codexCliConfig = null;
   try {
     const db = loadDb(dbPath);
     const validEntries = parsed.filter((p) => p.entry).map((p) => p.entry);
@@ -597,6 +780,23 @@ async function bulkImport(opts = {}) {
     skipped = merge.skipped;
     addedEmails = merge.addedEmails;
     skippedEmails = merge.skippedEmails;
+
+    // Auto-configure Codex CLI so the user is never blocked by 401.
+    // We do this whenever at least one entry was added (or already exists)
+    // so the very first import "just works" end-to-end.
+    if (opts.configureCodex !== false) {
+      try {
+        codexCliConfig = configureCodexCli({ db, baseUrl, log });
+        if (codexCliConfig.createdKey) {
+          log(
+            `API key mới: ${codexCliConfig.apiKeyName} (sk-…${codexCliConfig.apiKey.slice(-6)})`
+          );
+        }
+      } catch (e) {
+        log(`Cảnh báo cấu hình Codex CLI: ${e.message}`);
+      }
+    }
+
     saveDb(dbPath, db);
     log(
       `Đã ghi db.json — thêm ${added}, bỏ qua ${skipped} (trùng email/token).`
@@ -648,6 +848,7 @@ async function bulkImport(opts = {}) {
     backup,
     restarted,
     restartPid,
+    codexCliConfig,
   };
 }
 
@@ -671,4 +872,7 @@ module.exports = {
   backupDb,
   mergeEntries,
   bulkImport,
+  configureCodexCli,
+  codexConfigPath,
+  codexAuthPath,
 };
