@@ -1,0 +1,12 @@
+{
+  "id_token": "eyJREDACTED.eyJhdWQiOlsiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS92MSJdLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAwIiwiY2hhdGdwdF9wbGFuX3R5cGUiOiJmcmVlIn0sImh0dHBzOi8vYXBpLm9wZW5haS5jb20vcHJvZmlsZSI6eyJlbWFpbCI6InNhbXBsZUBleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlfX0.REDACTED",
+  "access_token": "eyJREDACTED_ACCESS_TOKEN_PLACEHOLDER",
+  "refresh_token": "eyJREDACTED_REFRESH_TOKEN_PLACEHOLDER",
+  "account_id": "00000000-0000-0000-0000-000000000000",
+  "last_refresh": "2026-05-22T20:53:26Z",
+  "email": "sample@example.com",
+  "type": "codex",
+  "expired": "2026-06-01T20:53:27Z",
+  "oai_password": "REDACTED",
+  "outlook_email": "sample@example.com"
+}

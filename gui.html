@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>9router – ChatGPT/Codex Importer</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4d;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --accent: #3d9cf0;
+      --accent-dim: #2a6fad;
+      --ok: #3dd68c;
+      --err: #f07178;
+      --warn: #e6c07b;
+      --radius: 10px;
+      --font: system-ui, "Segoe UI", Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 1.5rem 1rem 3rem;
+    }
+    header {
+      margin-bottom: 1.5rem;
+    }
+    header h1 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin: 0 0 0.35rem;
+      letter-spacing: -0.02em;
+    }
+    header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .grid {
+      display: grid;
+      gap: 1rem;
+    }
+    @media (min-width: 640px) {
+      .grid-2 { grid-template-columns: 1fr 1fr; }
+    }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+    input[type="text"],
+    input[type="password"],
+    input[type="number"] {
+      width: 100%;
+      padding: 0.55rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(61, 156, 240, 0.2);
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.1rem;
+    }
+    .drop {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 2rem 1rem;
+      text-align: center;
+      color: var(--muted);
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      margin-top: 0.75rem;
+    }
+    .drop:hover, .drop.dragover {
+      border-color: var(--accent);
+      background: rgba(61, 156, 240, 0.06);
+    }
+    .drop strong { color: var(--text); }
+    .file-list {
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+      max-height: 8rem;
+      overflow-y: auto;
+    }
+    .file-list li { margin: 0.2rem 0; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-top: 1rem;
+    }
+    button {
+      font-family: inherit;
+      font-size: 0.9rem;
+      padding: 0.55rem 1.1rem;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    button.primary:hover { background: var(--accent-dim); }
+    button.primary:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    button.ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    button.ghost:hover { color: var(--text); border-color: var(--muted); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      margin-top: 0.75rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.45rem 0.5rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 500; }
+    .status-ok { color: var(--ok); }
+    .status-err { color: var(--err); }
+    .status-warn { color: var(--warn); }
+    .banner {
+      margin-top: 1rem;
+      padding: 0.65rem 0.85rem;
+      border-radius: var(--radius);
+      font-size: 0.88rem;
+    }
+    .banner.err {
+      background: rgba(240, 113, 120, 0.12);
+      border: 1px solid rgba(240, 113, 120, 0.35);
+      color: var(--err);
+    }
+    .banner.ok {
+      background: rgba(61, 214, 140, 0.1);
+      border: 1px solid rgba(61, 214, 140, 0.35);
+      color: var(--ok);
+    }
+    .banner.warn {
+      background: rgba(230, 192, 123, 0.1);
+      border: 1px solid rgba(230, 192, 123, 0.35);
+      color: var(--warn);
+    }
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      margin-top: 0.75rem;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+    .check-row input { accent-color: var(--accent); width: 16px; height: 16px; }
+    #fileInput { display: none; }
+    code { font-size: 0.82em; background: var(--bg); padding: 0.1em 0.35em; border-radius: 4px; }
+    .meta {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.25rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>9router – ChatGPT/Codex Importer</h1>
+      <p>Kéo thả file JSON OAuth của ChatGPT/Codex (mỗi file 1 tài khoản). Tool sẽ ghi thẳng vào <code>%APPDATA%\9router\db.json</code>.</p>
+    </header>
+
+    <div class="grid">
+      <div class="panel">
+        <div class="grid grid-2">
+          <div>
+            <label for="dbPath">Đường dẫn db.json</label>
+            <input type="text" id="dbPath" value="" autocomplete="off" placeholder="%APPDATA%\\9router\\db.json" />
+          </div>
+          <div>
+            <label for="url">URL 9router (kiểm tra trạng thái)</label>
+            <input type="text" id="url" value="http://127.0.0.1:20128" autocomplete="off" />
+          </div>
+        </div>
+
+        <div class="check-row">
+          <input type="checkbox" id="forceStop" checked />
+          <label for="forceStop" style="margin:0;color:var(--text);font-size:0.9rem;cursor:pointer">
+            Tự động dừng &amp; khởi động lại 9router
+          </label>
+        </div>
+        <p class="meta">Bỏ chọn nếu bạn đã tắt 9router thủ công và muốn tool chỉ ghi DB.</p>
+
+        <div
+          class="drop"
+          id="drop"
+          tabindex="0"
+          role="button"
+          aria-label="Kéo thả file JSON vào đây"
+        >
+          <strong>Kéo thả</strong> file <code>.json</code> vào đây hoặc <strong>nhấn để chọn</strong>
+        </div>
+        <input type="file" id="fileInput" accept=".json,application/json" multiple />
+
+        <div class="actions">
+          <button type="button" class="primary" id="btnParse">Kiểm tra token</button>
+          <button type="button" class="ghost" id="btnImport">Import vào 9router</button>
+          <button type="button" class="ghost" id="btnClear">Xóa danh sách</button>
+        </div>
+      </div>
+
+      <div class="panel" id="resultPanel" hidden>
+        <div id="banner"></div>
+        <div id="fileListWrap" hidden>
+          <label>File đã chọn</label>
+          <ul class="file-list" id="fileNames"></ul>
+        </div>
+        <div id="tableWrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('fileInput');
+    const dbPathEl = document.getElementById('dbPath');
+    const urlEl = document.getElementById('url');
+    const forceStopEl = document.getElementById('forceStop');
+    const btnParse = document.getElementById('btnParse');
+    const btnImport = document.getElementById('btnImport');
+    const btnClear = document.getElementById('btnClear');
+    const resultPanel = document.getElementById('resultPanel');
+    const banner = document.getElementById('banner');
+    const fileNames = document.getElementById('fileNames');
+    const fileListWrap = document.getElementById('fileListWrap');
+    const tableWrap = document.getElementById('tableWrap');
+
+    /** @type {Map<string, { name: string, text: string }>} */
+    const files = new Map();
+
+    function renderFileList() {
+      fileNames.innerHTML = '';
+      for (const name of files.keys()) {
+        const li = document.createElement('li');
+        li.textContent = name;
+        fileNames.appendChild(li);
+      }
+      fileListWrap.hidden = files.size === 0;
+    }
+
+    function setBanner(text, kind) {
+      banner.className = 'banner ' + (kind || '');
+      banner.textContent = text || '';
+      banner.hidden = !text;
+    }
+
+    function payloadFiles() {
+      return Array.from(files.values());
+    }
+
+    async function postJson(path, body) {
+      const r = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || r.statusText || 'Lỗi mạng');
+      return data;
+    }
+
+    function esc(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function renderParseTable(rows) {
+      if (!rows || rows.length === 0) {
+        tableWrap.innerHTML = '';
+        return;
+      }
+      let h =
+        '<table><thead><tr><th>File</th><th>Email</th><th>Plan</th><th>Hết hạn</th><th>Trạng thái</th></tr></thead><tbody>';
+      for (const row of rows) {
+        const name = esc(row.name || '');
+        if (row.error) {
+          h +=
+            '<tr><td>' + name + '</td><td colspan="4"><span class="status-err">' +
+            esc(row.error) +
+            '</span></td></tr>';
+        } else {
+          const s = row.source || {};
+          h +=
+            '<tr><td>' +
+            name +
+            '</td><td>' +
+            esc(s.email || '—') +
+            '</td><td>' +
+            esc(s.chatgptPlanType || '—') +
+            '</td><td>' +
+            esc(s.expiresAt || '—') +
+            '</td><td><span class="status-ok">OK · refresh…' +
+            esc(s.refreshTail || '') +
+            '</span></td></tr>';
+        }
+      }
+      h += '</tbody></table>';
+      tableWrap.innerHTML = h;
+    }
+
+    function renderImportTable(parsed, addedEmails, skippedEmails) {
+      const added = new Set(addedEmails || []);
+      const skipped = new Set(skippedEmails || []);
+      let h =
+        '<table><thead><tr><th>File</th><th>Email</th><th>Plan</th><th>Trạng thái</th></tr></thead><tbody>';
+      for (const row of parsed || []) {
+        const name = esc(row.name || (row.file ? row.file.split(/[\\/]/).pop() : ''));
+        if (row.error) {
+          h +=
+            '<tr><td>' + name + '</td><td colspan="3"><span class="status-err">' +
+            esc(row.error) + '</span></td></tr>';
+        } else {
+          const s = row.source || {};
+          let cell;
+          if (added.has(s.email || row.entryName)) {
+            cell = '<span class="status-ok">Đã thêm</span>';
+          } else if (skipped.has(s.email || row.entryName)) {
+            cell = '<span class="status-warn">Bỏ qua (trùng)</span>';
+          } else {
+            cell = '<span class="status-ok">OK</span>';
+          }
+          h +=
+            '<tr><td>' + name + '</td><td>' + esc(s.email || '—') +
+            '</td><td>' + esc(s.chatgptPlanType || '—') +
+            '</td><td>' + cell + '</td></tr>';
+        }
+      }
+      h += '</tbody></table>';
+      tableWrap.innerHTML = h;
+    }
+
+    async function addFileList(fileList) {
+      for (const f of fileList) {
+        if (!f.name.toLowerCase().endsWith('.json')) continue;
+        const text = await f.text();
+        files.set(f.name + '_' + f.size, { name: f.name, text });
+      }
+      renderFileList();
+      resultPanel.hidden = files.size === 0;
+    }
+
+    drop.addEventListener('click', () => fileInput.click());
+    drop.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        fileInput.click();
+      }
+    });
+    fileInput.addEventListener('change', (e) => {
+      addFileList(e.target.files);
+      fileInput.value = '';
+    });
+    ['dragenter', 'dragover'].forEach((ev) => {
+      drop.addEventListener(ev, (e) => {
+        e.preventDefault();
+        drop.classList.add('dragover');
+      });
+    });
+    ['dragleave', 'drop'].forEach((ev) => {
+      drop.addEventListener(ev, (e) => {
+        e.preventDefault();
+        drop.classList.remove('dragover');
+      });
+    });
+    drop.addEventListener('drop', (e) => {
+      addFileList(e.dataTransfer.files);
+    });
+
+    btnClear.addEventListener('click', () => {
+      files.clear();
+      renderFileList();
+      resultPanel.hidden = true;
+      tableWrap.innerHTML = '';
+      setBanner('', '');
+    });
+
+    btnParse.addEventListener('click', async () => {
+      if (files.size === 0) {
+        alert('Chưa có file JSON nào.');
+        return;
+      }
+      btnParse.disabled = true;
+      try {
+        const data = await postJson('/api/parse', { files: payloadFiles() });
+        resultPanel.hidden = false;
+        const okCount = (data.rows || []).filter((r) => !r.error).length;
+        const errCount = (data.rows || []).length - okCount;
+        setBanner(
+          'Đã phân tích ' + (data.rows || []).length + ' file: ' + okCount +
+            ' OK, ' + errCount + ' lỗi (chưa ghi DB).',
+          errCount > 0 ? 'warn' : 'ok'
+        );
+        renderParseTable(data.rows);
+      } catch (err) {
+        resultPanel.hidden = false;
+        setBanner(String(err.message || err), 'err');
+        tableWrap.innerHTML = '';
+      } finally {
+        btnParse.disabled = false;
+      }
+    });
+
+    btnImport.addEventListener('click', async () => {
+      if (files.size === 0) {
+        alert('Chưa có file JSON nào.');
+        return;
+      }
+      btnImport.disabled = true;
+      try {
+        const data = await postJson('/api/import', {
+          files: payloadFiles(),
+          forceStop: !!forceStopEl.checked,
+          dbPath: dbPathEl.value.trim() || undefined,
+          baseUrl: urlEl.value.trim() || undefined,
+        });
+        resultPanel.hidden = false;
+        if (!data.ok) {
+          setBanner('Lỗi: ' + (data.message || data.error || 'không rõ'), 'err');
+          renderImportTable(data.parsed || [], [], []);
+          return;
+        }
+        const msg =
+          'Hoàn tất: +' + (data.added || 0) + ' thêm mới, ' +
+          (data.skipped || 0) + ' bỏ qua' +
+          (data.wasRunning
+            ? ' · 9router restart: ' + (data.restarted ? 'OK' : 'FAIL')
+            : ' · 9router không chạy lúc import');
+        setBanner(msg, (data.skipped || 0) > 0 && (data.added || 0) === 0 ? 'warn' : 'ok');
+        renderImportTable(data.parsed || [], data.addedEmails, data.skippedEmails);
+      } catch (err) {
+        resultPanel.hidden = false;
+        setBanner(String(err.message || err), 'err');
+      } finally {
+        btnImport.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

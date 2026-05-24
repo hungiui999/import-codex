@@ -1,0 +1,15 @@
+node_modules/
+*.log
+*.bak
+db.json.bak-*
+db.json.tmp
+
+# Đừng commit token thật
+tokens/*.json
+!tokens/.gitkeep
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
