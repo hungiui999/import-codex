@@ -20,6 +20,7 @@ const {
   verifyChatgptPlan,
   bulkImport,
 } = require('./importer-core');
+const { readZipEntries } = require('./zip-reader');
 
 const MAX_BODY = 32 * 1024 * 1024;
 
@@ -90,11 +91,50 @@ guiHtml = guiHtml.replace(
     '"'
 );
 
+// Expand a list of incoming uploads. Each upload is { name, text?, zip? }
+// where `zip` is a base64-encoded buffer for ZIP files. JSON files come
+// through verbatim; ZIP files are decoded to N JSON entries server-side.
+function expandUploads(uploads) {
+  const out = [];
+  const errors = [];
+  for (const u of uploads || []) {
+    if (!u || typeof u.name !== 'string') continue;
+    if (u.zip && typeof u.zip === 'string') {
+      let buf;
+      try {
+        buf = Buffer.from(u.zip, 'base64');
+      } catch (e) {
+        errors.push({ name: u.name, error: 'ZIP base64 không hợp lệ' });
+        continue;
+      }
+      let entries;
+      try {
+        entries = readZipEntries(buf, { filter: /\.json$/i });
+      } catch (e) {
+        errors.push({ name: u.name, error: `Đọc ZIP lỗi: ${e.message}` });
+        continue;
+      }
+      if (entries.length === 0) {
+        errors.push({ name: u.name, error: 'ZIP không có entry .json' });
+        continue;
+      }
+      for (const e of entries) {
+        out.push({ name: `${u.name}!${e.name}`, text: e.text });
+      }
+    } else if (typeof u.text === 'string') {
+      out.push({ name: u.name, text: u.text });
+    }
+  }
+  return { uploads: out, errors };
+}
+
 // Pure parse for /api/parse — never touches DB.
 async function parseUploads(uploads, { verifyPlanOnline = true } = {}) {
+  const { uploads: expanded, errors } = expandUploads(uploads);
   const rows = [];
+  for (const e of errors) rows.push({ name: e.name, error: e.error });
   const verifyTargets = [];
-  for (const u of uploads || []) {
+  for (const u of expanded) {
     if (!u || typeof u.text !== 'string') continue;
     const r = parseCodexFile(u.text);
     if (r.error) {
@@ -170,15 +210,26 @@ const server = http.createServer(async (req, res) => {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw);
-      const uploads = Array.isArray(body.files)
-        ? body.files.filter((f) => f && typeof f.name === 'string' && typeof f.text === 'string')
+      const inputUploads = Array.isArray(body.files)
+        ? body.files.filter(
+            (f) =>
+              f &&
+              typeof f.name === 'string' &&
+              (typeof f.text === 'string' || typeof f.zip === 'string')
+          )
         : [];
+
+      // Server-side expand: ZIP → N JSON uploads.
+      const { uploads, errors: expandErrors } = expandUploads(inputUploads);
 
       if (uploads.length === 0) {
         sendJson(res, 200, {
           ok: false,
-          message: 'Không có file JSON nào',
-          parsed: [],
+          message:
+            expandErrors.length > 0
+              ? `Không có file JSON hợp lệ (${expandErrors.length} file lỗi)`
+              : 'Không có file JSON nào',
+          parsed: expandErrors.map((e) => ({ name: e.name, error: e.error })),
         });
         return;
       }
@@ -213,8 +264,14 @@ const server = http.createServer(async (req, res) => {
           ...p,
           name: byPath.get(p.file) || (p.file ? path.basename(p.file) : ''),
         }));
+        // Surface ZIP expand errors (corrupt zip etc.) at the top of the
+        // parsed list so the UI shows them too.
+        const allParsed = [
+          ...expandErrors.map((e) => ({ name: e.name, error: e.error })),
+          ...parsed,
+        ];
 
-        sendJson(res, 200, { ...result, parsed });
+        sendJson(res, 200, { ...result, parsed: allParsed });
       } finally {
         // Clean up staged files no matter what.
         try {

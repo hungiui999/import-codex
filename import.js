@@ -13,14 +13,16 @@
  * Không cần npm install — chỉ dùng module core của Node (≥ 18).
  *
  * USAGE
- *   node import.js                                # quét ./tokens/*.json
+ *   node import.js                                # quét ./tokens/*.{json,zip} (đệ quy)
  *   node import.js file1.json file2.json          # các file cụ thể
- *   node import.js .\folder                       # toàn bộ *.json trong folder
+ *   node import.js .\folder                       # quét đệ quy folder (json + zip)
+ *   node import.js bundle.zip                     # extract & import mọi *.json bên trong
  *   node import.js --list                         # dry-run, in preview, KHÔNG ghi
  *   node import.js --force-stop                   # dừng + khởi động lại 9router
  *   node import.js --no-restart                   # ghi nhưng không restart
  *   node import.js --no-configure-codex           # KHÔNG tự config Codex CLI
- *   node import.js --db D:\path\db.json           # chỉ định db.json khác
+ *   node import.js --no-verify-plan               # KHÔNG verify plan online
+ *   node import.js --db D:\path\db.json           # chỉ định db.json/sqlite khác
  *
  * Mặc định, sau khi import xong tool sẽ:
  *   - đảm bảo 9router có ít nhất 1 API key (tạo mới nếu cần)
@@ -49,6 +51,7 @@ const {
   bulkImport,
   is9routerRunning,
 } = require('./importer-core');
+const { readZipEntries } = require('./zip-reader');
 
 // ---------- CLI args ----------
 function parseArgs(argv) {
@@ -136,21 +139,35 @@ function fmtSource(s) {
   let parseFails = 0;
   const previewRows = [];
   for (const f of files) {
-    let text;
+    let uploads;
     try {
-      text = fs.readFileSync(f, 'utf8');
+      if (f.toLowerCase().endsWith('.zip')) {
+        const buf = fs.readFileSync(f);
+        const entries = readZipEntries(buf, { filter: /\.json$/i });
+        uploads = entries.map((e) => ({ name: `${path.basename(f)}!${e.name}`, text: e.text }));
+        if (uploads.length === 0) {
+          log(`  ${bad(path.basename(f))} – ${c.red}ZIP không có entry .json${c.reset}`);
+          parseFails++;
+          continue;
+        }
+      } else {
+        uploads = [{ name: path.basename(f), text: fs.readFileSync(f, 'utf8') }];
+      }
     } catch (e) {
       log(`  ${bad(path.basename(f))} – ${c.red}đọc file lỗi: ${e.message}${c.reset}`);
       parseFails++;
       continue;
     }
-    const r = parseCodexFile(text);
-    if (r.error) {
-      log(`  ${bad(path.basename(f))} – ${c.red}${r.error}${c.reset}`);
-      parseFails++;
-    } else {
-      previewRows.push({ file: f, source: r.source });
-      log(`  ${ok(path.basename(f))} – ${c.dim}${fmtSource(r.source)}${c.reset}`);
+    for (const u of uploads) {
+      const r = parseCodexFile(u.text);
+      const display = uploads.length === 1 ? path.basename(f) : `${path.basename(f)} → ${u.name.split('!').pop()}`;
+      if (r.error) {
+        log(`  ${bad(display)} – ${c.red}${r.error}${c.reset}`);
+        parseFails++;
+      } else {
+        previewRows.push({ file: f, displayName: display, source: r.source });
+        log(`  ${ok(display)} – ${c.dim}${fmtSource(r.source)}${c.reset}`);
+      }
     }
   }
 
@@ -167,20 +184,21 @@ function fmtSource(s) {
           accountId: row.source.chatgptAccountId,
           timeoutMs: 6000,
         });
+        const label = row.displayName || path.basename(row.file);
         if (v.ok && v.plan) {
           if (v.plan !== row.source.chatgptPlanType) {
             log(
-              `  ${warn(path.basename(row.file))} – plan JWT="${row.source.chatgptPlanType}" → API="${c.bold}${v.plan}${c.reset}"`
+              `  ${warn(label)} – plan JWT="${row.source.chatgptPlanType}" → API="${c.bold}${v.plan}${c.reset}"`
             );
           } else {
             log(
-              `  ${ok(path.basename(row.file))} – ${c.dim}plan đã verify: ${c.reset}${c.bold}${v.plan}${c.reset}`
+              `  ${ok(label)} – ${c.dim}plan đã verify: ${c.reset}${c.bold}${v.plan}${c.reset}`
             );
           }
           row.source.chatgptPlanType = v.plan;
         } else {
           log(
-            `  ${warn(path.basename(row.file))} – verify plan thất bại: ${v.reason || 'unknown'} (giữ JWT="${row.source.chatgptPlanType}")`
+            `  ${warn(label)} – verify plan thất bại: ${v.reason || 'unknown'} (giữ JWT="${row.source.chatgptPlanType}")`
           );
         }
         // Drop transient access token from preview so it never leaks.

@@ -94,19 +94,72 @@ function loadBetterSqlite() {
 
 function expandInputs(inputs) {
   const files = [];
+  const seen = new Set();
+  function pushFile(p) {
+    const norm = path.resolve(p);
+    if (seen.has(norm)) return;
+    seen.add(norm);
+    files.push(norm);
+  }
+  function walk(dir) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+    for (const ent of entries) {
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walk(p);
+      } else if (ent.isFile()) {
+        const lower = ent.name.toLowerCase();
+        if (lower.endsWith('.json') || lower.endsWith('.zip')) {
+          pushFile(p);
+        }
+      }
+    }
+  }
   for (const inp of inputs || []) {
     if (!inp) continue;
     if (!fs.existsSync(inp)) continue;
     const stat = fs.statSync(inp);
     if (stat.isDirectory()) {
-      for (const f of fs.readdirSync(inp)) {
-        if (f.toLowerCase().endsWith('.json')) files.push(path.join(inp, f));
-      }
+      walk(inp);
     } else if (stat.isFile()) {
-      files.push(inp);
+      pushFile(inp);
     }
   }
   return files;
+}
+
+// Read a single file path on disk and return one or more
+// { name, text } "uploads" — JSON files yield 1 upload, ZIP files yield N
+// uploads (one per .json entry inside, recursively walked virtually).
+let _zipReader = null;
+function loadZipReader() {
+  if (_zipReader) return _zipReader;
+  _zipReader = require('./zip-reader');
+  return _zipReader;
+}
+
+function readPathAsUploads(filePath) {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith('.zip')) {
+    const buf = fs.readFileSync(filePath);
+    const entries = loadZipReader().readZipEntries(buf, { filter: /\.json$/i });
+    const base = path.basename(filePath);
+    return entries.map((e) => ({
+      name: `${base}!${e.name}`,
+      text: e.text,
+    }));
+  }
+  return [
+    {
+      name: path.basename(filePath),
+      text: fs.readFileSync(filePath, 'utf8'),
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,16 +1102,23 @@ async function bulkImport(opts = {}) {
   const files = expandInputs(inputs);
   const parsed = [];
   for (const f of files) {
-    let text;
+    let uploads;
     try {
-      text = fs.readFileSync(f, 'utf8');
+      uploads = readPathAsUploads(f);
     } catch (e) {
       parsed.push({ file: f, error: `Không đọc được file: ${e.message}` });
       continue;
     }
-    const r = parseCodexFile(text);
-    if (r.error) parsed.push({ file: f, error: r.error });
-    else parsed.push({ file: f, entry: r.entry, source: r.source });
+    if (uploads.length === 0) {
+      parsed.push({ file: f, error: 'Không có entry .json nào trong file ZIP' });
+      continue;
+    }
+    for (const u of uploads) {
+      const r = parseCodexFile(u.text);
+      const displayName = uploads.length === 1 ? f : `${f}::${u.name}`;
+      if (r.error) parsed.push({ file: displayName, error: r.error });
+      else parsed.push({ file: displayName, entry: r.entry, source: r.source });
+    }
   }
 
   // 0.5) Best-effort online plan verification for each parsed entry. Updates

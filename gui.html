@@ -194,7 +194,7 @@
   <div class="wrap">
     <header>
       <h1>9router – ChatGPT/Codex Importer</h1>
-      <p>Kéo thả file JSON OAuth của ChatGPT/Codex (mỗi file 1 tài khoản). Tool sẽ ghi thẳng vào <code>%APPDATA%\9router\db.json</code>.</p>
+      <p>Kéo thả file JSON OAuth của ChatGPT/Codex (mỗi file 1 tài khoản), file <code>.zip</code> chứa nhiều JSON, hoặc cả thư mục. Tool ghi thẳng vào DB của 9router.</p>
     </header>
 
     <div class="grid">
@@ -223,11 +223,13 @@
           id="drop"
           tabindex="0"
           role="button"
-          aria-label="Kéo thả file JSON vào đây"
+          aria-label="Kéo thả file JSON / ZIP / thư mục vào đây"
         >
-          <strong>Kéo thả</strong> file <code>.json</code> vào đây hoặc <strong>nhấn để chọn</strong>
+          <strong>Kéo thả</strong> file <code>.json</code>, <code>.zip</code>, hoặc cả thư mục vào đây<br>
+          <span style="font-size:0.85rem">hoặc <strong>nhấn để chọn file</strong> · <a href="#" id="btnPickFolder" style="color:var(--accent);text-decoration:none">chọn thư mục</a></span>
         </div>
-        <input type="file" id="fileInput" accept=".json,application/json" multiple />
+        <input type="file" id="fileInput" accept=".json,.zip,application/json,application/zip" multiple />
+        <input type="file" id="folderInput" multiple webkitdirectory directory style="display:none" />
 
         <div class="actions">
           <button type="button" class="primary" id="btnParse">Kiểm tra token</button>
@@ -262,7 +264,7 @@
     const fileListWrap = document.getElementById('fileListWrap');
     const tableWrap = document.getElementById('tableWrap');
 
-    /** @type {Map<string, { name: string, text: string }>} */
+    /** @type {Map<string, { name: string, text?: string, zip?: string }>} */
     const files = new Map();
 
     function renderFileList() {
@@ -368,17 +370,48 @@
       tableWrap.innerHTML = h;
     }
 
+    function bufferToBase64(buffer) {
+      // Avoid the 1-arg-per-byte limit of fromCharCode by chunking.
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(binary);
+    }
+
     async function addFileList(fileList) {
+      let added = 0;
       for (const f of fileList) {
-        if (!f.name.toLowerCase().endsWith('.json')) continue;
-        const text = await f.text();
-        files.set(f.name + '_' + f.size, { name: f.name, text });
+        const lower = (f.name || '').toLowerCase();
+        const relPath = f.webkitRelativePath || f.name;
+        if (lower.endsWith('.zip')) {
+          const buf = await f.arrayBuffer();
+          files.set(relPath + '_' + f.size, {
+            name: relPath,
+            zip: bufferToBase64(buf),
+          });
+          added++;
+        } else if (lower.endsWith('.json')) {
+          const text = await f.text();
+          files.set(relPath + '_' + f.size, { name: relPath, text });
+          added++;
+        }
       }
       renderFileList();
       resultPanel.hidden = files.size === 0;
+      if (added === 0 && fileList.length > 0) {
+        setBanner('Không có file .json hoặc .zip nào trong danh sách đã chọn.', 'warn');
+        resultPanel.hidden = false;
+      }
     }
 
-    drop.addEventListener('click', () => fileInput.click());
+    drop.addEventListener('click', (e) => {
+      // Don't trigger main file picker if user clicked the "chọn thư mục" link.
+      if (e.target && e.target.id === 'btnPickFolder') return;
+      fileInput.click();
+    });
     drop.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
@@ -388,6 +421,16 @@
     fileInput.addEventListener('change', (e) => {
       addFileList(e.target.files);
       fileInput.value = '';
+    });
+    const folderInput = document.getElementById('folderInput');
+    document.getElementById('btnPickFolder').addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      folderInput.click();
+    });
+    folderInput.addEventListener('change', (e) => {
+      addFileList(e.target.files);
+      folderInput.value = '';
     });
     ['dragenter', 'dragover'].forEach((ev) => {
       drop.addEventListener(ev, (e) => {
