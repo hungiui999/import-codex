@@ -8,13 +8,16 @@
  * (or copying, if STORE) the raw bytes.
  *
  * Supports the common case (deflate / store, ZIP64 not needed). Throws on
- * encrypted or unsupported compression methods.
+ * encrypted or unsupported compression methods, and on ZIP64 archives
+ * (where central-directory offsets are stored in a separate locator).
  *
  * Public API:
  *   readZipEntries(buffer, { filter }) -> Array<{ name, text, sizeUncompressed }>
  *
  * Only entries whose name matches `filter` (regex or function) are decoded.
- * Default filter accepts *.json files.
+ * Default filter accepts *.json files. Filenames are matched after
+ * normalising backslashes to forward slashes (Compress-Archive on Windows
+ * sometimes emits backslashes).
  */
 
 const zlib = require('zlib');
@@ -22,6 +25,11 @@ const zlib = require('zlib');
 const SIG_LFH = 0x04034b50; // local file header
 const SIG_CFH = 0x02014b50; // central file header
 const SIG_EOCD = 0x06054b50; // end of central directory
+const SIG_ZIP64_EOCD_LOC = 0x07064b50; // ZIP64 EOCD locator
+
+// Sentinel values that indicate a ZIP64 record carries the real value.
+const U16_MAX = 0xffff;
+const U32_MAX = 0xffffffff;
 
 function findEOCD(buf) {
   // EOCD is at most 22 bytes + comment ≤ 65535 → search the last 65557 bytes.
@@ -30,6 +38,13 @@ function findEOCD(buf) {
     if (buf.readUInt32LE(i) === SIG_EOCD) return i;
   }
   return -1;
+}
+
+function looksLikeZip64(buf, eocdOff) {
+  if (eocdOff < 20) return false;
+  // The ZIP64 End-of-Central-Directory Locator sits 20 bytes before the
+  // EOCD, with its own signature.
+  return buf.readUInt32LE(eocdOff - 20) === SIG_ZIP64_EOCD_LOC;
 }
 
 function readZipEntries(buf, opts = {}) {
@@ -51,6 +66,19 @@ function readZipEntries(buf, opts = {}) {
   const cdSize = buf.readUInt32LE(eocdOff + 12);
   const cdOffset = buf.readUInt32LE(eocdOff + 16);
 
+  // ZIP64 detection: any sentinel field, or presence of the ZIP64 locator
+  // immediately before the EOCD.
+  if (
+    totalEntries === U16_MAX ||
+    cdSize === U32_MAX ||
+    cdOffset === U32_MAX ||
+    looksLikeZip64(buf, eocdOff)
+  ) {
+    throw new Error(
+      'ZIP64 không được hỗ trợ (>4GB hoặc >65535 entry). Hãy giải nén thủ công và truyền các file JSON trực tiếp.'
+    );
+  }
+
   if (cdOffset + cdSize > buf.length) {
     throw new Error('Central directory ngoài phạm vi buffer');
   }
@@ -69,11 +97,24 @@ function readZipEntries(buf, opts = {}) {
     const extraLen = buf.readUInt16LE(p + 30);
     const commentLen = buf.readUInt16LE(p + 32);
     const lhOffset = buf.readUInt32LE(p + 42);
-    const name = buf.slice(p + 46, p + 46 + fileNameLen).toString('utf8');
+    const rawName = buf.slice(p + 46, p + 46 + fileNameLen).toString('utf8');
     p += 46 + fileNameLen + extraLen + commentLen;
+
+    // Compress-Archive on Windows occasionally emits backslashes inside
+    // entry names; normalise so callers see canonical forward-slash paths.
+    const name = rawName.replace(/\\/g, '/');
 
     // Skip directory entries.
     if (name.endsWith('/')) continue;
+    if (
+      compressedSize === U32_MAX ||
+      uncompressedSize === U32_MAX ||
+      lhOffset === U32_MAX
+    ) {
+      throw new Error(
+        `ZIP64 không được hỗ trợ (entry "${name}" có kích thước >4GB).`
+      );
+    }
     if (!matches(name)) continue;
 
     if (lhOffset + 30 > buf.length) {

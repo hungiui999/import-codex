@@ -293,14 +293,39 @@
     const fileListWrap = document.getElementById('fileListWrap');
     const tableWrap = document.getElementById('tableWrap');
 
-    /** @type {Map<string, { name: string, text?: string, zip?: string }>} */
+    /** @type {Map<string, { name: string, size: number, text?: string, zip?: string }>} */
     const files = new Map();
+
+    function uniqueId() {
+      try { return crypto.randomUUID(); } catch (_) {
+        return 't' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+      }
+    }
 
     function renderFileList() {
       fileNames.innerHTML = '';
-      for (const name of files.keys()) {
+      for (const [id, item] of files.entries()) {
         const li = document.createElement('li');
-        li.textContent = name;
+        li.style.display = 'flex';
+        li.style.alignItems = 'center';
+        li.style.gap = '0.5rem';
+        const span = document.createElement('span');
+        span.textContent = item.name + (item.size ? ' (' + Math.round(item.size / 1024) + ' KB)' : '');
+        span.style.flex = '1';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = '×';
+        btn.title = 'Xoá khỏi danh sách';
+        btn.style.padding = '0 0.5rem';
+        btn.style.fontSize = '0.95rem';
+        btn.className = 'ghost';
+        btn.addEventListener('click', () => {
+          files.delete(id);
+          renderFileList();
+          if (files.size === 0) resultPanel.hidden = true;
+        });
+        li.appendChild(span);
+        li.appendChild(btn);
         fileNames.appendChild(li);
       }
       fileListWrap.hidden = files.size === 0;
@@ -313,7 +338,13 @@
     }
 
     function payloadFiles() {
-      return Array.from(files.values());
+      // Strip Map-only fields like `size` before sending to the server.
+      return Array.from(files.values()).map((u) => {
+        const out = { name: u.name };
+        if (typeof u.text === 'string') out.text = u.text;
+        if (typeof u.zip === 'string') out.zip = u.zip;
+        return out;
+      });
     }
 
     async function postJson(path, body) {
@@ -350,13 +381,19 @@
             '</span></td></tr>';
         } else {
           const s = row.source || {};
+          const plan = esc(s.chatgptPlanType || '—');
+          const planSrc = s.planSource === 'subscriptions_api'
+            ? '<span title="Verified qua subscriptions API" style="font-size:0.7em;color:var(--ok);margin-left:0.25rem">API</span>'
+            : s.planSource === 'jwt_only'
+            ? '<span title="Chỉ đọc từ JWT, chưa verify online" style="font-size:0.7em;color:var(--warn);margin-left:0.25rem">JWT</span>'
+            : '';
           h +=
             '<tr><td>' +
             name +
             '</td><td>' +
             esc(s.email || '—') +
             '</td><td>' +
-            esc(s.chatgptPlanType || '—') +
+            plan + planSrc +
             '</td><td>' +
             esc(s.expiresAt || '—') +
             '</td><td><span class="status-ok">OK · refresh…' +
@@ -368,9 +405,10 @@
       tableWrap.innerHTML = h;
     }
 
-    function renderImportTable(parsed, addedEmails, skippedEmails) {
+    function renderImportTable(parsed, addedEmails, skippedEmails, refreshedEmails) {
       const added = new Set(addedEmails || []);
       const skipped = new Set(skippedEmails || []);
+      const refreshed = new Set(refreshedEmails || []);
       let h =
         '<table><thead><tr><th>File</th><th>Email</th><th>Plan</th><th>Trạng thái</th></tr></thead><tbody>';
       for (const row of parsed || []) {
@@ -381,10 +419,13 @@
             esc(row.error) + '</span></td></tr>';
         } else {
           const s = row.source || {};
+          const key = s.email || row.entryName;
           let cell;
-          if (added.has(s.email || row.entryName)) {
+          if (added.has(key)) {
             cell = '<span class="status-ok">Đã thêm</span>';
-          } else if (skipped.has(s.email || row.entryName)) {
+          } else if (refreshed.has(key)) {
+            cell = '<span class="status-ok">Đã cập nhật</span>';
+          } else if (skipped.has(key)) {
             cell = '<span class="status-warn">Bỏ qua (trùng)</span>';
           } else {
             cell = '<span class="status-ok">OK</span>';
@@ -417,14 +458,15 @@
         const relPath = f.webkitRelativePath || f.name;
         if (lower.endsWith('.zip')) {
           const buf = await f.arrayBuffer();
-          files.set(relPath + '_' + f.size, {
+          files.set(uniqueId(), {
             name: relPath,
+            size: f.size || 0,
             zip: bufferToBase64(buf),
           });
           added++;
         } else if (lower.endsWith('.json')) {
           const text = await f.text();
-          files.set(relPath + '_' + f.size, { name: relPath, text });
+          files.set(uniqueId(), { name: relPath, size: f.size || 0, text });
           added++;
         }
       }
@@ -532,12 +574,16 @@
         }
         const msg =
           'Hoàn tất: +' + (data.added || 0) + ' thêm mới, ' +
-          (data.skipped || 0) + ' bỏ qua' +
+          '↻' + (data.refreshed || 0) + ' cập nhật, ' +
+          (data.skippedOnly || 0) + ' bỏ qua' +
           (data.wasRunning
             ? ' · 9router restart: ' + (data.restarted ? 'OK' : 'FAIL')
             : ' · 9router không chạy lúc import');
-        setBanner(msg, (data.skipped || 0) > 0 && (data.added || 0) === 0 ? 'warn' : 'ok');
-        renderImportTable(data.parsed || [], data.addedEmails, data.skippedEmails);
+        setBanner(
+          msg,
+          (data.added || 0) === 0 && (data.refreshed || 0) === 0 ? 'warn' : 'ok'
+        );
+        renderImportTable(data.parsed || [], data.addedEmails, data.skippedEmails, data.refreshedEmails);
       } catch (err) {
         resultPanel.hidden = false;
         setBanner(String(err.message || err), 'err');

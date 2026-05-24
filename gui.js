@@ -16,13 +16,16 @@ const { spawn } = require('child_process');
 const {
   DEFAULT_DB_PATH,
   DEFAULT_BASE_URL,
-  parseCodexFile,
-  verifyChatgptPlan,
+  expandUploads,
+  parseUploads,
   bulkImport,
 } = require('./importer-core');
-const { readZipEntries } = require('./zip-reader');
 
+// 32 MiB cap for the JSON request body. ZIPs are sent base64-encoded by the
+// browser, so the effective ZIP size limit is ~24 MiB. ZIPs larger than that
+// don't fit through the GUI; users should use the CLI instead.
 const MAX_BODY = 32 * 1024 * 1024;
+const MAX_ZIP_BYTES_DECODED = Math.floor(MAX_BODY * 0.75);
 
 function parseArgs() {
   const a = process.argv.slice(2);
@@ -40,7 +43,12 @@ function readBody(req) {
     req.on('data', (ch) => {
       total += ch.length;
       if (total > MAX_BODY) {
-        reject(new Error('Payload quá lớn'));
+        reject(
+          new Error(
+            `Payload quá lớn (>${Math.floor(MAX_BODY / 1024 / 1024)} MiB). ` +
+              `Với ZIP lớn, dùng CLI: node import.js <file>.zip`
+          )
+        );
         req.destroy();
         return;
       }
@@ -91,93 +99,24 @@ guiHtml = guiHtml.replace(
   `placeholder="${dbPathDisplay}" data-default="${dbPathDisplay}" data-backend="${dbBackend}"`
 );
 
-// Expand a list of incoming uploads. Each upload is { name, text?, zip? }
-// where `zip` is a base64-encoded buffer for ZIP files. JSON files come
-// through verbatim; ZIP files are decoded to N JSON entries server-side.
-function expandUploads(uploads) {
-  const out = [];
-  const errors = [];
+// Reject obviously oversized ZIP uploads up front so the user gets a clear
+// error message instead of a generic "payload too large".
+function validateZipSizes(uploads) {
   for (const u of uploads || []) {
-    if (!u || typeof u.name !== 'string') continue;
-    if (u.zip && typeof u.zip === 'string') {
-      let buf;
-      try {
-        buf = Buffer.from(u.zip, 'base64');
-      } catch (e) {
-        errors.push({ name: u.name, error: 'ZIP base64 không hợp lệ' });
-        continue;
-      }
-      let entries;
-      try {
-        entries = readZipEntries(buf, { filter: /\.json$/i });
-      } catch (e) {
-        errors.push({ name: u.name, error: `Đọc ZIP lỗi: ${e.message}` });
-        continue;
-      }
-      if (entries.length === 0) {
-        errors.push({ name: u.name, error: 'ZIP không có entry .json' });
-        continue;
-      }
-      for (const e of entries) {
-        out.push({ name: `${u.name}!${e.name}`, text: e.text });
-      }
-    } else if (typeof u.text === 'string') {
-      out.push({ name: u.name, text: u.text });
-    }
-  }
-  return { uploads: out, errors };
-}
-
-// Pure parse for /api/parse — never touches DB.
-async function parseUploads(uploads, { verifyPlanOnline = true } = {}) {
-  const { uploads: expanded, errors } = expandUploads(uploads);
-  const rows = [];
-  for (const e of errors) rows.push({ name: e.name, error: e.error });
-  const verifyTargets = [];
-  for (const u of expanded) {
-    if (!u || typeof u.text !== 'string') continue;
-    const r = parseCodexFile(u.text);
-    if (r.error) {
-      rows.push({ name: u.name, error: r.error });
-    } else {
-      const row = { name: u.name, source: r.source };
-      rows.push(row);
-      if (verifyPlanOnline && r.source.accessToken && r.source.chatgptAccountId) {
-        verifyTargets.push(row);
+    if (u && u.zip && typeof u.zip === 'string') {
+      // Each base64 char encodes 6 bits; estimate decoded size.
+      const decodedBytes = Math.floor((u.zip.length * 3) / 4);
+      if (decodedBytes > MAX_ZIP_BYTES_DECODED) {
+        return {
+          ok: false,
+          error:
+            `ZIP "${u.name}" (~${(decodedBytes / 1024 / 1024).toFixed(1)} MiB) ` +
+            `quá lớn cho GUI. Dùng CLI: node import.js "${u.name}"`,
+        };
       }
     }
   }
-
-  if (verifyTargets.length > 0) {
-    await Promise.all(
-      verifyTargets.map(async (row) => {
-        try {
-          const v = await verifyChatgptPlan({
-            accessToken: row.source.accessToken,
-            accountId: row.source.chatgptAccountId,
-            timeoutMs: 6000,
-          });
-          if (v.ok && v.plan) {
-            row.source.chatgptPlanFromJwt = row.source.chatgptPlanType;
-            row.source.chatgptPlanType = v.plan;
-            row.source.planSource = 'subscriptions_api';
-          } else {
-            row.source.planSource = 'jwt_only';
-            row.source.planVerificationError = v.reason || 'unknown';
-          }
-        } catch (e) {
-          row.source.planSource = 'jwt_only';
-          row.source.planVerificationError = e.message;
-        }
-      })
-    );
-  }
-
-  // Strip transient accessToken from every row before returning to the UI.
-  for (const row of rows) {
-    if (row.source) delete row.source.accessToken;
-  }
-  return rows;
+  return { ok: true };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -194,10 +133,21 @@ const server = http.createServer(async (req, res) => {
       const raw = await readBody(req);
       const body = JSON.parse(raw);
       const uploads = Array.isArray(body.files)
-        ? body.files.filter((f) => f && typeof f.name === 'string' && typeof f.text === 'string')
+        ? body.files.filter(
+            (f) =>
+              f &&
+              typeof f.name === 'string' &&
+              (typeof f.text === 'string' || typeof f.zip === 'string')
+          )
         : [];
+      const sizeCheck = validateZipSizes(uploads);
+      if (!sizeCheck.ok) {
+        sendJson(res, 200, { ok: false, error: sizeCheck.error });
+        return;
+      }
       const rows = await parseUploads(uploads, {
         verifyPlanOnline: body.verifyPlanOnline !== false,
+        verifyConcurrency: 6,
       });
       sendJson(res, 200, { ok: true, rows });
     } catch (e) {
@@ -218,6 +168,11 @@ const server = http.createServer(async (req, res) => {
               (typeof f.text === 'string' || typeof f.zip === 'string')
           )
         : [];
+      const sizeCheck = validateZipSizes(inputUploads);
+      if (!sizeCheck.ok) {
+        sendJson(res, 200, { ok: false, message: sizeCheck.error, parsed: [] });
+        return;
+      }
 
       // Server-side expand: ZIP → N JSON uploads.
       const { uploads, errors: expandErrors } = expandUploads(inputUploads);
@@ -258,12 +213,25 @@ const server = http.createServer(async (req, res) => {
         });
 
         // Rewrite "file" field in parsed[] back to original upload names so the
-        // UI shows the user's filenames, not staging paths.
+        // UI shows the user's filenames, not staging paths. Also strip any
+        // residual accessToken just in case (parseUploads already does this,
+        // but bulkImport-derived rows are independent).
         const byPath = new Map(stagedFiles.map((s) => [s.path, s.originalName]));
-        const parsed = (result.parsed || []).map((p) => ({
-          ...p,
-          name: byPath.get(p.file) || (p.file ? path.basename(p.file) : ''),
-        }));
+        const parsed = (result.parsed || []).map((p) => {
+          const cleaned = { ...p };
+          if (cleaned.source) {
+            const s = { ...cleaned.source };
+            delete s.accessToken;
+            cleaned.source = s;
+          }
+          if (cleaned.entry) {
+            // The entry contains tokens — the UI never needs them.
+            const { accessToken, refreshToken, ...rest } = cleaned.entry;
+            cleaned.entry = rest;
+          }
+          cleaned.name = byPath.get(p.file) || (p.file ? path.basename(p.file) : '');
+          return cleaned;
+        });
         // Surface ZIP expand errors (corrupt zip etc.) at the top of the
         // parsed list so the UI shows them too.
         const allParsed = [
