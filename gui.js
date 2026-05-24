@@ -17,6 +17,7 @@ const {
   DEFAULT_DB_PATH,
   DEFAULT_BASE_URL,
   parseCodexFile,
+  verifyChatgptPlan,
   bulkImport,
 } = require('./importer-core');
 
@@ -90,13 +91,51 @@ guiHtml = guiHtml.replace(
 );
 
 // Pure parse for /api/parse — never touches DB.
-function parseUploads(uploads) {
+async function parseUploads(uploads, { verifyPlanOnline = true } = {}) {
   const rows = [];
+  const verifyTargets = [];
   for (const u of uploads || []) {
     if (!u || typeof u.text !== 'string') continue;
     const r = parseCodexFile(u.text);
-    if (r.error) rows.push({ name: u.name, error: r.error });
-    else rows.push({ name: u.name, source: r.source });
+    if (r.error) {
+      rows.push({ name: u.name, error: r.error });
+    } else {
+      const row = { name: u.name, source: r.source };
+      rows.push(row);
+      if (verifyPlanOnline && r.source.accessToken && r.source.chatgptAccountId) {
+        verifyTargets.push(row);
+      }
+    }
+  }
+
+  if (verifyTargets.length > 0) {
+    await Promise.all(
+      verifyTargets.map(async (row) => {
+        try {
+          const v = await verifyChatgptPlan({
+            accessToken: row.source.accessToken,
+            accountId: row.source.chatgptAccountId,
+            timeoutMs: 6000,
+          });
+          if (v.ok && v.plan) {
+            row.source.chatgptPlanFromJwt = row.source.chatgptPlanType;
+            row.source.chatgptPlanType = v.plan;
+            row.source.planSource = 'subscriptions_api';
+          } else {
+            row.source.planSource = 'jwt_only';
+            row.source.planVerificationError = v.reason || 'unknown';
+          }
+        } catch (e) {
+          row.source.planSource = 'jwt_only';
+          row.source.planVerificationError = e.message;
+        }
+      })
+    );
+  }
+
+  // Strip transient accessToken from every row before returning to the UI.
+  for (const row of rows) {
+    if (row.source) delete row.source.accessToken;
   }
   return rows;
 }
@@ -117,7 +156,9 @@ const server = http.createServer(async (req, res) => {
       const uploads = Array.isArray(body.files)
         ? body.files.filter((f) => f && typeof f.name === 'string' && typeof f.text === 'string')
         : [];
-      const rows = parseUploads(uploads);
+      const rows = await parseUploads(uploads, {
+        verifyPlanOnline: body.verifyPlanOnline !== false,
+      });
       sendJson(res, 200, { ok: true, rows });
     } catch (e) {
       sendJson(res, 400, { ok: false, error: e.message || String(e) });
@@ -161,6 +202,7 @@ const server = http.createServer(async (req, res) => {
           baseUrl: typeof body.baseUrl === 'string' && body.baseUrl ? body.baseUrl : DEFAULT_BASE_URL,
           forceStop: !!body.forceStop,
           noRestart: !!body.noRestart,
+          verifyPlanOnline: body.verifyPlanOnline !== false,
           dryRun: false,
         });
 

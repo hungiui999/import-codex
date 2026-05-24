@@ -45,6 +45,7 @@ const {
   DEFAULT_DB_PATH,
   expandInputs,
   parseCodexFile,
+  verifyChatgptPlan,
   bulkImport,
   is9routerRunning,
 } = require('./importer-core');
@@ -57,6 +58,7 @@ function parseArgs(argv) {
     forceStop: false,
     noRestart: false,
     configureCodex: true,
+    verifyPlanOnline: true,
     dbPath: DEFAULT_DB_PATH,
     baseUrl: DEFAULT_BASE_URL,
     help: false,
@@ -68,6 +70,8 @@ function parseArgs(argv) {
     else if (a === '--no-restart') opts.noRestart = true;
     else if (a === '--no-configure-codex' || a === '--no-codex-config')
       opts.configureCodex = false;
+    else if (a === '--no-verify-plan' || a === '--offline-plan')
+      opts.verifyPlanOnline = false;
     else if (a === '--db') opts.dbPath = argv[++i];
     else if (a === '--url') opts.baseUrl = argv[++i];
     else if (a === '-h' || a === '--help') opts.help = true;
@@ -130,6 +134,7 @@ function fmtSource(s) {
 
   log(`${c.dim}Tìm thấy ${files.length} file:${c.reset}`);
   let parseFails = 0;
+  const previewRows = [];
   for (const f of files) {
     let text;
     try {
@@ -144,8 +149,44 @@ function fmtSource(s) {
       log(`  ${bad(path.basename(f))} – ${c.red}${r.error}${c.reset}`);
       parseFails++;
     } else {
+      previewRows.push({ file: f, source: r.source });
       log(`  ${ok(path.basename(f))} – ${c.dim}${fmtSource(r.source)}${c.reset}`);
     }
+  }
+
+  // Online plan verification (best-effort) — runs both for dry-run and for
+  // the real import path. For the real import bulkImport will run it again,
+  // but doing it here too gives the user an instant preview line.
+  if (opts.verifyPlanOnline && previewRows.length > 0) {
+    log(`${c.dim}Đang verify plan qua chatgpt.com/backend-api/subscriptions…${c.reset}`);
+    await Promise.all(
+      previewRows.map(async (row) => {
+        if (!row.source.accessToken || !row.source.chatgptAccountId) return;
+        const v = await verifyChatgptPlan({
+          accessToken: row.source.accessToken,
+          accountId: row.source.chatgptAccountId,
+          timeoutMs: 6000,
+        });
+        if (v.ok && v.plan) {
+          if (v.plan !== row.source.chatgptPlanType) {
+            log(
+              `  ${warn(path.basename(row.file))} – plan JWT="${row.source.chatgptPlanType}" → API="${c.bold}${v.plan}${c.reset}"`
+            );
+          } else {
+            log(
+              `  ${ok(path.basename(row.file))} – ${c.dim}plan đã verify: ${c.reset}${c.bold}${v.plan}${c.reset}`
+            );
+          }
+          row.source.chatgptPlanType = v.plan;
+        } else {
+          log(
+            `  ${warn(path.basename(row.file))} – verify plan thất bại: ${v.reason || 'unknown'} (giữ JWT="${row.source.chatgptPlanType}")`
+          );
+        }
+        // Drop transient access token from preview so it never leaks.
+        delete row.source.accessToken;
+      })
+    );
   }
 
   if (opts.dry) {
@@ -168,6 +209,7 @@ function fmtSource(s) {
       forceStop: opts.forceStop,
       noRestart: opts.noRestart,
       configureCodex: opts.configureCodex,
+      verifyPlanOnline: opts.verifyPlanOnline,
       dryRun: false,
       log: (m) => log(`${c.dim}·${c.reset} ${m}`),
     });
@@ -190,7 +232,8 @@ function fmtSource(s) {
   log(
     `${c.bold}Hoàn tất:${c.reset} ` +
       `${c.green}+${result.added} thêm mới${c.reset}, ` +
-      `${c.yellow}${result.skipped} bỏ qua (trùng)${c.reset}` +
+      `${c.cyan}↻${result.refreshed || 0} cập nhật${c.reset}, ` +
+      `${c.yellow}${(result.skipped || 0) - (result.refreshed || 0)} bỏ qua${c.reset}` +
       (result.backup ? `\n${c.dim}Backup:${c.reset} ${result.backup}` : '') +
       (result.wasRunning
         ? `\n${c.dim}9router restart:${c.reset} ${result.restarted ? c.green + 'OK' + c.reset : c.red + 'FAIL' + c.reset}`
@@ -199,8 +242,17 @@ function fmtSource(s) {
   if (result.addedEmails && result.addedEmails.length) {
     log(`${c.dim}Thêm:${c.reset} ${result.addedEmails.join(', ')}`);
   }
-  if (result.skippedEmails && result.skippedEmails.length) {
-    log(`${c.dim}Bỏ qua:${c.reset} ${result.skippedEmails.join(', ')}`);
+  if (result.refreshedEmails && result.refreshedEmails.length) {
+    log(`${c.dim}Cập nhật:${c.reset} ${result.refreshedEmails.join(', ')}`);
+  }
+  // Only show "Skipped" for entries that were genuine duplicates AND
+  // weren't refreshed (rare in practice — mostly when refreshOnDuplicate
+  // is disabled by the caller).
+  const skippedOnly = (result.skippedEmails || []).filter(
+    (e) => !(result.refreshedEmails || []).includes(e)
+  );
+  if (skippedOnly.length) {
+    log(`${c.dim}Bỏ qua:${c.reset} ${skippedOnly.join(', ')}`);
   }
   if (result.codexCliConfig) {
     const cc = result.codexCliConfig;

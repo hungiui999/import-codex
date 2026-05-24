@@ -25,6 +25,7 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const https = require('https');
 const os = require('os');
 const { execFileSync, spawn } = require('child_process');
 const { randomUUID } = require('crypto');
@@ -205,10 +206,111 @@ function parseCodexFile(jsonText) {
       email,
       chatgptAccountId,
       chatgptPlanType,
+      chatgptPlanFromJwt: chatgptPlanType,
       expiresAt,
       refreshTail: refreshToken.slice(-8),
+      accessToken, // kept transient for online verification; do NOT log
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// ChatGPT subscriptions API — verify real plan online
+//
+// Calls https://chatgpt.com/backend-api/subscriptions?account_id=<id>
+// with Authorization: Bearer <access_token>. Returns the plan name observed,
+// or null on any error/timeout.
+// Response shape (relevant subset):
+//   { plan_type: "plus" | "free" | ..., subscription_id, ... }
+// or sometimes { has_subscription: bool, plan: { ... } }.
+// ---------------------------------------------------------------------------
+
+function verifyChatgptPlan({ accessToken, accountId, timeoutMs = 6000 }) {
+  return new Promise((resolve) => {
+    if (!accessToken || !accountId) {
+      resolve({ ok: false, reason: 'missing_input' });
+      return;
+    }
+    const u = new URL(
+      `https://chatgpt.com/backend-api/subscriptions?account_id=${encodeURIComponent(accountId)}`
+    );
+    const req = https.request(
+      {
+        method: 'GET',
+        hostname: u.hostname,
+        port: 443,
+        path: u.pathname + u.search,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+          'User-Agent':
+            'codex-cli/1.0.18 (9router-codex-importer)',
+          'OAI-Client-Version': 'codex-cli',
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let buf = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (buf += c));
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            resolve({
+              ok: false,
+              status: res.statusCode,
+              reason: `http_${res.statusCode}`,
+              body: buf.slice(0, 500),
+            });
+            return;
+          }
+          let body;
+          try {
+            body = JSON.parse(buf);
+          } catch (e) {
+            resolve({ ok: false, reason: 'parse_error', body: buf.slice(0, 500) });
+            return;
+          }
+          // Try several known shapes.
+          const plan =
+            (typeof body.plan_type === 'string' && body.plan_type) ||
+            (body.plan && typeof body.plan.name === 'string' && body.plan.name) ||
+            (body.plan && typeof body.plan.plan_type === 'string' && body.plan.plan_type) ||
+            (typeof body.subscription_plan === 'string' && body.subscription_plan) ||
+            null;
+          const planTypeRaw =
+            (plan ? String(plan).toLowerCase() : null);
+          // Normalise "chatgpt-plus" / "Plus" → "plus", etc.
+          let normalised = planTypeRaw;
+          if (planTypeRaw) {
+            if (/plus/.test(planTypeRaw)) normalised = 'plus';
+            else if (/team/.test(planTypeRaw)) normalised = 'team';
+            else if (/pro/.test(planTypeRaw)) normalised = 'pro';
+            else if (/enterprise|edu/.test(planTypeRaw)) normalised = 'enterprise';
+            else if (/free/.test(planTypeRaw)) normalised = 'free';
+          }
+          resolve({
+            ok: true,
+            plan: normalised,
+            rawPlan: plan,
+            hasSubscription:
+              body.has_subscription === true ||
+              !!body.subscription_id ||
+              (body.plan && body.plan.is_active === true) ||
+              false,
+            body,
+          });
+        });
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ ok: false, reason: 'timeout' });
+    });
+    req.on('error', (e) => {
+      resolve({ ok: false, reason: e.message });
+    });
+    req.end();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -601,18 +703,19 @@ function saveDb(dbPath, db) {
 
 function mergeEntries(db, entries, opts = {}) {
   const skipDuplicates = opts.skipDuplicates !== false;
+  const refreshOnDuplicate = opts.refreshOnDuplicate !== false;
   if (!Array.isArray(db.providerConnections)) db.providerConnections = [];
   const codexExisting = db.providerConnections.filter(
     (e) => e && e.provider === 'codex'
   );
-  const existingEmails = new Set(
-    codexExisting
-      .map((e) => (e.name || '').toLowerCase().trim())
-      .filter(Boolean)
-  );
-  const existingTokens = new Set(
-    codexExisting.map((e) => e.accessToken).filter(Boolean)
-  );
+  // Map email/token → reference to the existing entry (so we can mutate).
+  const byEmail = new Map();
+  const byToken = new Map();
+  for (const e of codexExisting) {
+    const key = (e.name || '').toLowerCase().trim();
+    if (key) byEmail.set(key, e);
+    if (e.accessToken) byToken.set(e.accessToken, e);
+  }
 
   let maxPriority = 0;
   for (const e of db.providerConnections) {
@@ -623,29 +726,55 @@ function mergeEntries(db, entries, opts = {}) {
 
   const added = [];
   const skipped = [];
+  const refreshed = [];
   for (const entry of entries) {
     const emailKey = (entry.name || '').toLowerCase().trim();
-    if (
-      skipDuplicates &&
-      ((emailKey && existingEmails.has(emailKey)) ||
-        existingTokens.has(entry.accessToken))
-    ) {
+    const dupByEmail = emailKey ? byEmail.get(emailKey) : null;
+    const dupByToken = byToken.get(entry.accessToken);
+    const existing = dupByEmail || dupByToken;
+
+    if (skipDuplicates && existing) {
+      if (refreshOnDuplicate) {
+        // Update mutable fields of the existing entry, but preserve id and
+        // createdAt. This is what makes plan corrections (free → plus) flow
+        // through to db.json on a re-import.
+        existing.accessToken = entry.accessToken;
+        existing.refreshToken = entry.refreshToken;
+        existing.expiresAt = entry.expiresAt;
+        existing.testStatus = entry.testStatus || existing.testStatus;
+        existing.updatedAt = new Date().toISOString();
+        if (entry.providerSpecificData && existing.providerSpecificData) {
+          existing.providerSpecificData = {
+            ...existing.providerSpecificData,
+            ...entry.providerSpecificData,
+          };
+        } else if (entry.providerSpecificData) {
+          existing.providerSpecificData = entry.providerSpecificData;
+        }
+        // Refresh token map so subsequent dupes within the same batch are
+        // matched against the new accessToken.
+        if (entry.accessToken) byToken.set(entry.accessToken, existing);
+        refreshed.push(existing);
+      }
       skipped.push(entry);
       continue;
     }
+
     maxPriority += 1;
     const e = { ...entry, priority: maxPriority };
     db.providerConnections.push(e);
-    if (emailKey) existingEmails.add(emailKey);
-    if (e.accessToken) existingTokens.add(e.accessToken);
+    if (emailKey) byEmail.set(emailKey, e);
+    if (e.accessToken) byToken.set(e.accessToken, e);
     added.push(e);
   }
 
   return {
     added: added.length,
     skipped: skipped.length,
+    refreshed: refreshed.length,
     addedEmails: added.map((e) => e.name),
     skippedEmails: skipped.map((e) => e.name),
+    refreshedEmails: refreshed.map((e) => e.name),
   };
 }
 
@@ -677,6 +806,7 @@ async function bulkImport(opts = {}) {
   const skipDuplicates = opts.skipDuplicates !== false;
 
   // 0) expand & parse inputs first (fail fast on no files).
+  const verifyPlanOnline = opts.verifyPlanOnline !== false;
   const files = expandInputs(inputs);
   const parsed = [];
   for (const f of files) {
@@ -690,6 +820,56 @@ async function bulkImport(opts = {}) {
     const r = parseCodexFile(text);
     if (r.error) parsed.push({ file: f, error: r.error });
     else parsed.push({ file: f, entry: r.entry, source: r.source });
+  }
+
+  // 0.5) Best-effort online plan verification for each parsed entry. Updates
+  // the entry's providerSpecificData.chatgptPlanType in place if the API
+  // returns a different plan than what the JWT claims (e.g. user upgraded
+  // to Plus after the token was issued).
+  if (verifyPlanOnline) {
+    await Promise.all(
+      parsed
+        .filter((p) => p.entry && p.source && p.source.accessToken && p.source.chatgptAccountId)
+        .map(async (p) => {
+          try {
+            const v = await verifyChatgptPlan({
+              accessToken: p.source.accessToken,
+              accountId: p.source.chatgptAccountId,
+              timeoutMs: opts.verifyTimeoutMs || 6000,
+            });
+            p.source.planVerification = v;
+            if (v.ok && v.plan) {
+              if (v.plan !== p.source.chatgptPlanType) {
+                log(
+                  `Plan thực tế khác JWT cho ${p.source.email || p.source.chatgptAccountId}: ` +
+                    `JWT="${p.source.chatgptPlanType}" → API="${v.plan}". Dùng API.`
+                );
+              }
+              p.source.chatgptPlanType = v.plan;
+              if (p.entry && p.entry.providerSpecificData) {
+                p.entry.providerSpecificData.chatgptPlanType = v.plan;
+                p.entry.providerSpecificData.planSource = 'subscriptions_api';
+              }
+            } else {
+              if (p.entry && p.entry.providerSpecificData) {
+                p.entry.providerSpecificData.planSource = 'jwt_only';
+                p.entry.providerSpecificData.planVerificationError =
+                  v.reason || 'unknown';
+              }
+            }
+          } catch (e) {
+            p.source.planVerification = { ok: false, reason: e.message };
+          } finally {
+            // Strip transient access token from source so callers/UIs never
+            // see it; entry.accessToken remains the canonical store.
+            delete p.source.accessToken;
+          }
+        })
+    );
+  } else {
+    for (const p of parsed) {
+      if (p.source) delete p.source.accessToken;
+    }
   }
 
   if (files.length === 0) {
@@ -768,8 +948,10 @@ async function bulkImport(opts = {}) {
   // 4) load + merge + save
   let added = 0;
   let skipped = 0;
+  let refreshed = 0;
   let addedEmails = [];
   let skippedEmails = [];
+  let refreshedEmails = [];
   let writeError = null;
   let codexCliConfig = null;
   try {
@@ -780,6 +962,8 @@ async function bulkImport(opts = {}) {
     skipped = merge.skipped;
     addedEmails = merge.addedEmails;
     skippedEmails = merge.skippedEmails;
+    refreshed = merge.refreshed || 0;
+    refreshedEmails = merge.refreshedEmails || [];
 
     // Auto-configure Codex CLI so the user is never blocked by 401.
     // We do this whenever at least one entry was added (or already exists)
@@ -799,7 +983,7 @@ async function bulkImport(opts = {}) {
 
     saveDb(dbPath, db);
     log(
-      `Đã ghi db.json — thêm ${added}, bỏ qua ${skipped} (trùng email/token).`
+      `Đã ghi db.json — thêm ${added}, cập nhật ${refreshed} (trùng), bỏ qua ${skipped - refreshed}.`
     );
   } catch (e) {
     writeError = e.message;
@@ -843,8 +1027,10 @@ async function bulkImport(opts = {}) {
     parsed,
     added,
     skipped,
+    refreshed,
     addedEmails,
     skippedEmails,
+    refreshedEmails,
     backup,
     restarted,
     restartPid,
@@ -863,6 +1049,7 @@ module.exports = {
   expandInputs,
   decodeJwtPayload,
   parseCodexFile,
+  verifyChatgptPlan,
   is9routerRunning,
   stop9router,
   start9router,
