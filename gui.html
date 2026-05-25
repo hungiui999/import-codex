@@ -221,6 +221,51 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+
+    /* Promo dialog */
+    .promo-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 20, 25, 0.78);
+      backdrop-filter: blur(2px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10000;
+      animation: fadein 0.15s ease-out;
+    }
+    .promo-overlay[hidden] { display: none; }
+    .promo-box {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem 1.4rem 1.2rem;
+      max-width: 380px;
+      width: calc(100% - 2rem);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+      text-align: center;
+    }
+    .promo-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin: 0 0 0.4rem;
+      color: var(--text);
+    }
+    .promo-msg {
+      font-size: 0.92rem;
+      color: var(--muted);
+      margin: 0 0 1.1rem;
+      line-height: 1.55;
+    }
+    .promo-actions {
+      display: flex;
+      gap: 0.55rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .promo-actions button {
+      min-width: 92px;
+    }
   </style>
 </head>
 <body>
@@ -292,7 +337,53 @@
     <div class="overlay-sub" id="overlaySub"></div>
   </div>
 
+  <div class="promo-overlay" id="promoOverlay" hidden role="dialog" aria-modal="true" aria-labelledby="promoTitle">
+    <div class="promo-box">
+      <h2 class="promo-title" id="promoTitle">Bạn có muốn mua ChatGPT Codex giá 10k?</h2>
+      <p class="promo-msg" id="promoMsg">Liên hệ <strong>@BotbanloBot</strong> trên Telegram để được hỗ trợ.</p>
+      <div class="promo-actions" id="promoActions">
+        <button type="button" class="primary" id="promoYes">Có</button>
+        <button type="button" class="ghost" id="promoNo">Không</button>
+      </div>
+    </div>
+  </div>
+
   <script>
+    // Promo dialog: hiện ngay khi load GUI.
+    (function promoDialog() {
+      const overlay = document.getElementById('promoOverlay');
+      const titleEl = document.getElementById('promoTitle');
+      const msgEl = document.getElementById('promoMsg');
+      const actions = document.getElementById('promoActions');
+      const TELE_URL = 'https://t.me/BotbanloBot';
+
+      function close() {
+        overlay.hidden = true;
+      }
+
+      function showStep2() {
+        titleEl.textContent = 'Cảm ơn bạn';
+        msgEl.innerHTML = 'Nếu có nhu cầu ghé <strong>@BotbanloBot</strong> nhé.';
+        actions.innerHTML = '';
+        const btnClose = document.createElement('button');
+        btnClose.type = 'button';
+        btnClose.className = 'ghost';
+        btnClose.textContent = 'Đóng';
+        btnClose.addEventListener('click', close);
+        actions.appendChild(btnClose);
+        btnClose.focus();
+      }
+
+      document.getElementById('promoYes').addEventListener('click', () => {
+        window.open(TELE_URL, '_blank', 'noopener');
+        close();
+      });
+      document.getElementById('promoNo').addEventListener('click', showStep2);
+
+      overlay.hidden = false;
+      document.getElementById('promoYes').focus();
+    })();
+
     const drop = document.getElementById('drop');
     const fileInput = document.getElementById('fileInput');
     const dbPathEl = document.getElementById('dbPath');
